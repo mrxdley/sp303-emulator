@@ -44,8 +44,38 @@ FetchContent_Declare(
 set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(nlohmann_json)
 
+# ─── miniaudio ────────────────────────────────────────────────────────────────
+
+FetchContent_Declare(
+    miniaudio
+    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+    GIT_TAG        0.11.21
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(miniaudio)
+
+add_library(miniaudio_iface INTERFACE)
+target_include_directories(miniaudio_iface INTERFACE ${miniaudio_SOURCE_DIR})
+
+# ─── Audio adapter ────────────────────────────────────────────────────────────
+
+add_library(sp303_audio audio/sp303_audio.cpp)
+target_include_directories(sp303_audio PUBLIC audio)
+target_link_libraries(sp303_audio PRIVATE miniaudio_iface)
+
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+    target_link_libraries(sp303_audio PRIVATE dl pthread m)
+endif()
+if(APPLE)
+    target_link_libraries(sp303_audio PRIVATE
+        "-framework CoreAudio"
+        "-framework AudioToolbox"
+        "-framework AudioUnit")
+endif()
+
 # ─── Renderer ─────────────────────────────────────────────────────────────────
 
 add_executable(sp303_renderer renderer/main.cpp)
-target_link_libraries(sp303_renderer PRIVATE sp303 raylib nlohmann_json::nlohmann_json)
-target_compile_options(sp303_renderer PRIVATE -Wall -Wextra)
+target_link_libraries(sp303_renderer PRIVATE
+    sp303 sp303_audio raylib nlohmann_json::nlohmann_json)
+target_compile_options(sp303_renderer PRIVATE -Wall -Wextra -Wno-stringop-truncation)
