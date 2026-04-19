@@ -1,6 +1,6 @@
 #include "raylib.h"
 #include "sp303.h"
-#include "sp303_audio.h"
+#include "controller.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <string>
@@ -8,7 +8,6 @@
 #include <unordered_map>
 #include <vector>
 #include <cmath>
-#include <cstring>
 
 using json = nlohmann::json;
 
@@ -16,6 +15,7 @@ using json = nlohmann::json;
 
 static const int SW = 1280;
 static const int SH =  780;
+static const int DRAG_GRID = 10;
 
 // ─── Colors ───────────────────────────────────────────────────────────────────
 
@@ -173,35 +173,6 @@ static std::unordered_map<int, SP303ButtonID> load_keymap() {
     }
 }
 
-// ─── Audio config persistence ─────────────────────────────────────────────────
-
-static const char* AUDIO_CFG_FILE = "audio_config.json";
-
-static SP303AudioConfig load_audio_config() {
-    SP303AudioConfig cfg;
-    sp303_audio_config_default(&cfg);
-    std::ifstream f(AUDIO_CFG_FILE);
-    if (!f.is_open()) return cfg;
-    try {
-        auto j = json::parse(f);
-        if (j.contains("output")) std::strncpy(cfg.output_name, j["output"].get<std::string>().c_str(), SP303_AUDIO_NAME_LEN - 1);
-        if (j.contains("input"))  std::strncpy(cfg.input_name,  j["input"] .get<std::string>().c_str(), SP303_AUDIO_NAME_LEN - 1);
-        if (j.contains("rate"))   cfg.sample_rate   = j["rate"];
-        if (j.contains("buffer")) cfg.buffer_frames = j["buffer"];
-    } catch (...) {}
-    return cfg;
-}
-
-static void save_audio_config(const SP303AudioConfig& cfg) {
-    json j;
-    j["output"] = cfg.output_name;
-    j["input"]  = cfg.input_name;
-    j["rate"]   = cfg.sample_rate;
-    j["buffer"] = cfg.buffer_frames;
-    std::ofstream f(AUDIO_CFG_FILE);
-    f << j.dump(2);
-}
-
 // ─── Config screen ────────────────────────────────────────────────────────────
 
 static const uint32_t SAMPLE_RATES[] = {44100, 48000, 96000};
@@ -212,10 +183,11 @@ static const int      N_BUFS         = 5;
 // Returns true when APPLY is clicked.
 // sel_* are indices into SAMPLE_RATES / BUFFER_SIZES / device lists.
 static bool draw_config_screen(
-    int& sel_out, int& sel_in, int& sel_rate, int& sel_buf,
+    int& sel_out, int& sel_in, int& sel_rate, int& sel_buf, float& peak_threshold,
     const std::vector<SP303AudioDeviceInfo>& out_devs,
     const std::vector<SP303AudioDeviceInfo>& in_devs,
-    bool playback_ok, int mx, int my, bool clicked)
+    bool playback_ok, int mx, int my, bool clicked, bool mouse_down,
+    float input_peak)
 {
     // Darken main view
     DrawRectangle(0, 0, SW, SH, {0, 0, 0, 170});
@@ -284,6 +256,62 @@ static bool draw_config_screen(
     // Buffer size
     d = selector(3, "Buffer size:", std::to_string(BUFFER_SIZES[sel_buf]) + " frames");
     if (d) sel_buf = (sel_buf + d + N_BUFS) % N_BUFS;
+
+    // Peak threshold slider
+    const int SRY = PY + 72 + 4 * 72;
+    const int SLX = PX + 174;
+    const int SLW = PW - 230;
+    const int SLH = 12;
+    DrawText("Peak threshold:", PX + 24, SRY - 1, 10, C_ALT);
+    DrawRectangle(SLX, SRY + 7, SLW, SLH, C_KNOB_TRACK);
+    DrawRectangleLines(SLX, SRY + 7, SLW, SLH, C_BORDER);
+    float clamped_threshold = std::clamp(peak_threshold, 0.0f, 1.0f);
+    int slider_fill_w = (int)(clamped_threshold * SLW);
+    if (slider_fill_w > 0)
+        DrawRectangle(SLX + 1, SRY + 8, std::max(slider_fill_w - 2, 0), SLH - 2, C_KNOB_FILL);
+    int knob_x = SLX + (int)(clamped_threshold * SLW);
+    DrawCircle(knob_x, SRY + 13, 8.0f, C_KNOB_THUMB);
+    char peak_buf[64];
+    std::snprintf(peak_buf, sizeof(peak_buf), "%.3f", clamped_threshold);
+    DrawText(peak_buf, SLX + SLW + 12, SRY - 1, 10, C_TEXT);
+    if (mouse_down && mx >= SLX && mx < SLX + SLW && my >= SRY && my < SRY + 26) {
+        peak_threshold = std::clamp((float)(mx - SLX) / (float)SLW, 0.0f, 1.0f);
+    }
+
+    // ── Input Volume Meter ─────────────────────────────────────────────────
+    const int METER_Y = PY + 72 + 5 * 72 - 8;
+    const int METER_X = PX + 24;
+    const int METER_W = PW - 48;
+    const int METER_H = 24;
+
+    DrawText("Input level:", METER_X, METER_Y - 18, 10, C_ALT);
+
+    // Background
+    DrawRectangle(METER_X, METER_Y, METER_W, METER_H, C_KNOB_TRACK);
+    DrawRectangleLines(METER_X, METER_Y, METER_W, METER_H, C_BORDER);
+
+    // Fill level (clamped 0-1, with some headroom)
+    float level = std::clamp(input_peak * 2.0f, 0.0f, 1.0f); // *2 for better visibility
+    int fill_w = (int)(level * METER_W);
+
+    // Color gradient: green -> yellow -> red
+    Color meter_color;
+    if (level < 0.5f) {
+        meter_color = {50, 180, 50, 255}; // green
+    } else if (level < 0.75f) {
+        meter_color = {180, 180, 50, 255}; // yellow
+    } else {
+        meter_color = {180, 50, 50, 255}; // red
+    }
+
+    if (fill_w > 0) {
+        DrawRectangle(METER_X + 1, METER_Y + 1, fill_w - 2, METER_H - 2, meter_color);
+    }
+
+    // Peak indicator line
+    if (level > 0.01f) {
+        DrawLine(METER_X + fill_w, METER_Y, METER_X + fill_w, METER_Y + METER_H, {255, 255, 255, 200});
+    }
 
     // Status row
     const char* status = playback_ok ? "output: OK" : "output: FAILED — check device";
@@ -539,6 +567,13 @@ static void draw_peak(const IndPos& p, bool lit) {
     DrawText("PEAK", p.x - MeasureText("PEAK", fs)/2, p.y + p.r + 3, fs, C_ALT);
 }
 
+static void draw_stereo_activity(const IndPos& p, bool lit) {
+    DrawCircle(p.x, p.y, (float)(p.r + 1), C_BORDER);
+    DrawCircle(p.x, p.y, (float)p.r,       lit ? C_PEAK_ON : C_PEAK_OFF);
+    const int fs = 8;
+    DrawText("ST", p.x - MeasureText("ST", fs)/2, p.y + p.r + 3, fs, C_ALT);
+}
+
 // ─── Hit testing ──────────────────────────────────────────────────────────────
 
 static bool hit_btn(int mx, int my, const BtnPos& r) {
@@ -554,6 +589,12 @@ static bool hit_disp(int mx, int my, const DispPos& dp) {
 }
 static bool hit_knob(int mx, int my, const KnobPos& k) {
     return mx >= k.x-6 && mx <= k.x+k.len+6 && my >= k.y-10 && my <= k.y+20;
+}
+
+static int snap_to_grid(int v) {
+    if (DRAG_GRID <= 1) return v;
+    float g = (float)DRAG_GRID;
+    return (int)std::lround(v / g) * DRAG_GRID;
 }
 
 // ─── Drag targets ─────────────────────────────────────────────────────────────
@@ -572,42 +613,10 @@ struct Drag {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 int main(void) {
-    // ── Audio ─────────────────────────────────────────────────────────────────
-    SP303AudioConfig audio_cfg = load_audio_config();
-    SP303Audio*      audio     = sp303_audio_create(&audio_cfg);
-
-    // Pre-load a 1s 440 Hz sine wave into slot 0 (PAD 1, Bank A) for testing
-    if (audio) {
-        const uint32_t sr     = audio_cfg.sample_rate;
-        const float    TWO_PI = 6.28318530718f;
-        std::vector<float> sine(sr);
-        for (uint32_t i = 0; i < sr; ++i)
-            sine[i] = 0.5f * std::sin(TWO_PI * 440.0f * i / (float)sr);
-        sp303_audio_load_sample(audio, 0, sine.data(), sr);
-    }
-
-    // Cache device lists for the config UI
-    std::vector<SP303AudioDeviceInfo> out_devs(64), in_devs(64);
-    int n_out = audio ? sp303_audio_list_outputs(audio, out_devs.data(), 64) : 0;
-    int n_in  = audio ? sp303_audio_list_inputs (audio, in_devs.data(),  64) : 0;
-    out_devs.resize(n_out);
-    in_devs .resize(n_in);
-
-    // Find initial selected indices matching the loaded config
-    int sel_out = 0, sel_in = 0, sel_rate = 0, sel_buf = 2; // default: 512 frames
-    for (int i = 0; i < n_out; ++i)
-        if (std::strncmp(out_devs[i].name, audio_cfg.output_name, SP303_AUDIO_NAME_LEN) == 0)
-            { sel_out = i; break; }
-    for (int i = 0; i < n_in; ++i)
-        if (std::strncmp(in_devs[i].name, audio_cfg.input_name, SP303_AUDIO_NAME_LEN) == 0)
-            { sel_in = i; break; }
-    for (int i = 0; i < N_RATES; ++i)
-        if (SAMPLE_RATES[i] == audio_cfg.sample_rate)  { sel_rate = i; break; }
-    for (int i = 0; i < N_BUFS; ++i)
-        if (BUFFER_SIZES[i] == audio_cfg.buffer_frames) { sel_buf  = i; break; }
+    RendererController controller{};
+    renderer_controller_init(&controller);
 
     bool config_open   = false;
-    bool playback_ok   = (audio != nullptr);
 
     // ── Core + renderer state ─────────────────────────────────────────────────
     SP303Device* dev    = sp303_create();
@@ -672,7 +681,20 @@ int main(void) {
                             int pad_id = SP303_BTN_PAD_1 + cur.active_bank * 8 + i;
                             sp303_button_down(dev, (SP303ButtonID)pad_id);
                             pressed_btn = pad_id;
-                            if (audio) sp303_audio_trigger(audio, pad_id - SP303_BTN_PAD_1);
+                            // Only trigger audio playback if not in sampling mode
+                            if (controller.audio &&
+                                !sp303_is_sampling_standby(dev) &&
+                                !sp303_is_sampling_ready(dev) &&
+                                !sp303_is_recording(dev) &&
+                                !sp303_is_threshold_mode(dev) &&
+                                !sp303_is_delete_mode(dev) &&
+                                sp303_pad_has_sample(dev, pad_id - SP303_BTN_PAD_1)) {
+                                int slot = pad_id - SP303_BTN_PAD_1;
+                                sp303_note_pad_played(dev, slot);
+                                bool loop_mode = sp303_get_pad_loop_mode(dev, slot);
+                                bool gate_mode = sp303_get_pad_gate_mode(dev, slot);
+                                sp303_audio_trigger_mode(controller.audio, slot, loop_mode, gate_mode);
+                            }
                             break;
                         }
                     }
@@ -699,6 +721,14 @@ int main(void) {
             }
             if (pressed_btn >= 0) {
                 sp303_button_up(dev, (SP303ButtonID)pressed_btn);
+                if (controller.audio &&
+                    pressed_btn >= SP303_BTN_PAD_1 &&
+                    pressed_btn <= SP303_BTN_PAD_32) {
+                    int slot = pressed_btn - SP303_BTN_PAD_1;
+                    if (sp303_get_pad_gate_mode(dev, slot)) {
+                        sp303_audio_note_off(controller.audio, slot);
+                    }
+                }
                 pressed_btn = -1;
             }
             active_knob = -1;
@@ -706,8 +736,8 @@ int main(void) {
 
         // ── Continuous drag ───────────────────────────────────────────────────
         if (drag.target != DRAG_NONE) {
-            int nx = mx - drag.offx;
-            int ny = my - drag.offy;
+            int nx = snap_to_grid(mx - drag.offx);
+            int ny = snap_to_grid(my - drag.offy);
             int t  = drag.target;
             if (t < SP303_BTN_COUNT) {
                 layout.buttons[t].x = nx;
@@ -738,6 +768,12 @@ int main(void) {
         // ── Keyboard ──────────────────────────────────────────────────────────
         if (!shift && !config_open) {
             SP303State cur = sp303_get_state(dev);
+            bool sampling_active =
+                sp303_is_sampling_standby(dev) ||
+                sp303_is_sampling_ready(dev) ||
+                sp303_is_recording(dev) ||
+                sp303_is_threshold_mode(dev) ||
+                sp303_is_delete_mode(dev);
             for (auto& [key, btn] : keymap) {
                 if (IsKeyPressed(key)) {
                     SP303ButtonID actual = btn;
@@ -745,12 +781,29 @@ int main(void) {
                         actual = (SP303ButtonID)(SP303_BTN_PAD_1 + cur.active_bank * 8 + (btn - SP303_BTN_PAD_1));
                     sp303_button_down(dev, actual);
                     key_held[key] = actual;
-                    if (audio && actual >= SP303_BTN_PAD_1 && actual <= SP303_BTN_PAD_32)
-                        sp303_audio_trigger(audio, actual - SP303_BTN_PAD_1);
+                    // Only trigger audio playback if not in sampling mode
+                    if (controller.audio && !sampling_active && actual >= SP303_BTN_PAD_1 && actual <= SP303_BTN_PAD_32) {
+                        int slot = actual - SP303_BTN_PAD_1;
+                        if (sp303_pad_has_sample(dev, slot)) {
+                            sp303_note_pad_played(dev, slot);
+                            bool loop_mode = sp303_get_pad_loop_mode(dev, slot);
+                            bool gate_mode = sp303_get_pad_gate_mode(dev, slot);
+                            sp303_audio_trigger_mode(controller.audio, slot, loop_mode, gate_mode);
+                        }
+                    }
                 }
                 if (IsKeyReleased(key)) {
                     auto it = key_held.find(key);
                     if (it != key_held.end()) {
+                        SP303ButtonID released = it->second;
+                        if (controller.audio &&
+                            released >= SP303_BTN_PAD_1 &&
+                            released <= SP303_BTN_PAD_32) {
+                            int slot = released - SP303_BTN_PAD_1;
+                            if (sp303_get_pad_gate_mode(dev, slot)) {
+                                sp303_audio_note_off(controller.audio, slot);
+                            }
+                        }
                         sp303_button_up(dev, it->second);
                         key_held.erase(it);
                     }
@@ -758,15 +811,7 @@ int main(void) {
             }
         }
 
-        // ── Tick + state ──────────────────────────────────────────────────────
-        sp303_tick(dev, 735);
-        SP303State state = sp303_get_state(dev);
-
-        // Drive PEAK indicator from the audio engine
-        if (audio) {
-            float peak = sp303_audio_peak(audio);
-            sp303_indicator_set(dev, SP303_IND_PEAK, peak > 0.85f);
-        }
+        SP303State state = renderer_controller_step(&controller, dev, active_knob);
 
         // ── Draw ──────────────────────────────────────────────────────────────
         BeginDrawing();
@@ -796,6 +841,8 @@ int main(void) {
         // Display + PEAK
         draw_display(layout.disp, state.display);
         draw_peak(layout.peak, state.indicators[SP303_IND_PEAK].lit);
+        IndPos stereo_pos = { layout.peak.x + 36, layout.peak.y, layout.peak.r };
+        draw_stereo_activity(stereo_pos, controller.stereo_activity_lit);
 
         if (!config_open && shift)
             DrawText("SHIFT + drag: reposition  |  release: save", 10, SH - 18, 9, C_ALT);
@@ -805,24 +852,13 @@ int main(void) {
         // Config overlay — draw + handle interaction in the draw phase
         if (config_open) {
             bool apply = draw_config_screen(
-                sel_out, sel_in, sel_rate, sel_buf,
-                out_devs, in_devs, playback_ok,
-                mx, my, IsMouseButtonPressed(MOUSE_BUTTON_LEFT));
+                controller.sel_out, controller.sel_in, controller.sel_rate, controller.sel_buf, controller.peak_threshold,
+                controller.out_devs, controller.in_devs, controller.playback_ok,
+                mx, my, IsMouseButtonPressed(MOUSE_BUTTON_LEFT), IsMouseButtonDown(MOUSE_BUTTON_LEFT),
+                controller.config_input_peak);
 
-            if (apply && audio) {
-                SP303AudioConfig new_cfg = audio_cfg;
-                if (!out_devs.empty())
-                    std::strncpy(new_cfg.output_name, out_devs[sel_out].name, SP303_AUDIO_NAME_LEN - 1);
-                if (!in_devs.empty())
-                    std::strncpy(new_cfg.input_name, in_devs[sel_in].name, SP303_AUDIO_NAME_LEN - 1);
-                new_cfg.sample_rate   = SAMPLE_RATES[sel_rate];
-                new_cfg.buffer_frames = BUFFER_SIZES[sel_buf];
-
-                playback_ok = sp303_audio_reconfigure(audio, &new_cfg);
-                if (playback_ok) {
-                    audio_cfg = new_cfg;
-                    save_audio_config(audio_cfg);
-                }
+            if (apply) {
+                renderer_controller_apply_audio_config(&controller);
             }
         }
 
@@ -831,7 +867,7 @@ int main(void) {
 
     save_layout(layout);
     sp303_destroy(dev);
-    sp303_audio_destroy(audio);
+    renderer_controller_shutdown(&controller);
     CloseWindow();
     return 0;
 }

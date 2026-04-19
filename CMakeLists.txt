@@ -8,8 +8,8 @@ include(FetchContent)
 
 # ─── Core library ─────────────────────────────────────────────────────────────
 
-add_library(sp303 src/sp303.cpp)
-target_include_directories(sp303 PUBLIC include PRIVATE src)
+add_library(sp303 core/sp303.cpp)
+target_include_directories(sp303 PUBLIC core PRIVATE core)
 target_compile_options(sp303 PRIVATE -Wall -Wextra -Wpedantic)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")
@@ -59,7 +59,9 @@ target_include_directories(miniaudio_iface INTERFACE ${miniaudio_SOURCE_DIR})
 
 # ─── Audio adapter ────────────────────────────────────────────────────────────
 
-add_library(sp303_audio audio/sp303_audio.cpp)
+add_library(sp303_audio
+    audio/sp303_audio.cpp
+    audio/sample_ops.cpp)
 target_include_directories(sp303_audio PUBLIC audio)
 target_link_libraries(sp303_audio PRIVATE miniaudio_iface)
 
@@ -75,7 +77,10 @@ endif()
 
 # ─── Renderer ─────────────────────────────────────────────────────────────────
 
-add_executable(sp303_renderer renderer/main.cpp)
+add_executable(sp303_renderer
+    renderer/main.cpp
+    renderer/controller.cpp)
 target_link_libraries(sp303_renderer PRIVATE
     sp303 sp303_audio raylib nlohmann_json::nlohmann_json)
+target_include_directories(sp303_renderer PRIVATE renderer)
 target_compile_options(sp303_renderer PRIVATE -Wall -Wextra -Wno-stringop-truncation)

@@ -103,6 +103,12 @@ typedef enum {
     SP303_KNOB_COUNT
 } SP303KnobID;
 
+typedef enum {
+    SP303_SAMPLE_QUALITY_STANDARD = 0,
+    SP303_SAMPLE_QUALITY_LONG,
+    SP303_SAMPLE_QUALITY_LOFI,
+} SP303SampleQuality;
+
 // ─── Metadata tables ──────────────────────────────────────────────────────────
 //
 // Indexed by SP303ButtonID / SP303KnobID. Useful for renderers that need to
@@ -152,6 +158,14 @@ extern const uint8_t SP303_SEG_DIGITS[10]; // 0–9 pre-encoded
 extern const uint8_t SP303_SEG_BLANK;      // all segments off
 extern const uint8_t SP303_SEG_DASH;       // middle bar only  ( - )
 extern const uint8_t SP303_SEG_ERR[3];     // "Err" across all 3 digits
+extern const uint8_t SP303_SEG_FUL[3];     // "FuL" across all 3 digits
+extern const uint8_t SP303_SEG_REC[3];     // "rEC" across all 3 digits
+extern const uint8_t SP303_SEG_RDY[3];     // "rdY" across all 3 digits
+extern const uint8_t SP303_SEG_EDT[3];     // "Edt" across all 3 digits
+extern const uint8_t SP303_SEG_DEL[3];     // "dEL" across all 3 digits
+extern const uint8_t SP303_SEG_TRC[3];     // "trC" across all 3 digits
+extern const uint8_t SP303_SEG_DAL[3];     // "dAL" across all 3 digits
+extern const uint8_t SP303_SEG_CHG[3];     // "CHG" across all 3 digits
 
 typedef struct {
     uint8_t digit[3]; // [0] = leftmost, [2] = rightmost
@@ -219,6 +233,41 @@ SP303State    sp303_get_state(const SP303Device* dev);
 // Display helpers
 void          sp303_display_number(SP303Device* dev, int n);                        // 0–999, left-pads with blanks
 void          sp303_display_raw   (SP303Device* dev, uint8_t d0, uint8_t d1, uint8_t d2);
+
+// ─── Sampling control (renderer <-> core sync) ────────────────────────────────
+// These allow the renderer to query sampling state and control the audio engine.
+
+bool sp303_is_sampling_standby   (const SP303Device* dev);
+bool sp303_is_sampling_ready     (const SP303Device* dev);
+bool sp303_is_recording          (const SP303Device* dev);
+bool sp303_is_threshold_mode     (const SP303Device* dev);
+bool sp303_is_start_end_level_mode(const SP303Device* dev);
+bool sp303_is_delete_mode        (const SP303Device* dev);
+int  sp303_get_sampling_target_pad(const SP303Device* dev);  // -1 if none selected
+void sp303_set_sampling_full     (SP303Device* dev);         // called when audio buffer fills
+void sp303_start_threshold_recording (SP303Device* dev);
+void sp303_finish_threshold_recording(SP303Device* dev);
+void sp303_note_pad_played       (SP303Device* dev, int pad_index);
+void sp303_set_edit_display_value(SP303Device* dev, int value);
+int  sp303_consume_deleted_pad   (SP303Device* dev); // -1 if none
+int  sp303_consume_truncate_pad  (SP303Device* dev); // -1 if none
+int  sp303_consume_delete_all_group(SP303Device* dev); // -1 none, 0=A/B, 1=C/D
+bool sp303_consume_swap_pads     (SP303Device* dev, int* pad_a, int* pad_b); // true if pending
+void sp303_set_mark_lit          (SP303Device* dev, bool lit);
+bool sp303_get_sampling_stereo   (const SP303Device* dev);
+SP303SampleQuality sp303_get_sampling_quality(const SP303Device* dev);
+
+// Last recorded pad (persists after recording stops, for audio assignment)
+int  sp303_get_last_sampling_target_pad(const SP303Device* dev);  // -1 if never recorded
+int  sp303_get_sample_level_threshold   (const SP303Device* dev); // 0-8
+int  sp303_get_last_played_pad          (const SP303Device* dev); // -1 if none
+int  sp303_consume_record_bpm_quantize  (SP303Device* dev);       // -1 if none, else 40-200
+bool sp303_get_pad_loop_mode            (const SP303Device* dev, int pad_index); // false=one-shot
+bool sp303_get_pad_gate_mode            (const SP303Device* dev, int pad_index); // false=trigger
+
+// Pad sample state (for UI display)
+bool sp303_pad_has_sample        (const SP303Device* dev, int pad_index);  // 0-31
+void sp303_pad_clear_sample      (SP303Device* dev, int pad_index);
 
 #ifdef __cplusplus
 }
