@@ -625,7 +625,15 @@ int main(void) {
         }
         if (!config_open && IsKeyPressed(KEY_F9)) {
             release_live_inputs();
-            ProjectIoResult res = project_load(QUICKSAVE_DIR, dev, controller.audio, controller.audio_cfg);
+            drag.target = DRAG_NONE;
+            sp303::Device* loaded_dev = sp303::create();
+            ProjectIoResult res = project_load(QUICKSAVE_DIR, loaded_dev, controller.audio, controller.audio_cfg);
+            if (res.ok) {
+                sp303::destroy(dev);
+                dev = loaded_dev;
+            } else {
+                sp303::destroy(loaded_dev);
+            }
             std::printf("[PROJECT] %s\n", res.message.c_str());
         }
 
