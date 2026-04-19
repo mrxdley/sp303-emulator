@@ -164,6 +164,7 @@ extern const uint8_t SEG_TRC[3];     // "trC" across all 3 digits
 extern const uint8_t SEG_DAL[3];     // "dAL" across all 3 digits
 extern const uint8_t SEG_CHG[3];     // "CHG" across all 3 digits
 extern const uint8_t SEG_LEV[3];     // "LEV" across all 3 digits
+extern const uint8_t SEG_ERS[3];     // "ErS" across all 3 digits
 extern const uint8_t SEG_PIT[3];     // "Pit" across all 3 digits
 extern const uint8_t SEG_FDB[3];     // "Fdb" across all 3 digits
 extern const uint8_t SEG_OFF[3];     // "oFF" across all 3 digits
@@ -223,6 +224,18 @@ struct PadProjectState {
     int     time_target_bpm = -1;
 };
 
+struct PatternProjectEvent {
+    int tick = 0;
+    int sample_pad = 0;
+};
+
+struct PatternProjectSlot {
+    bool assigned = false;
+    int length_measures = 1;
+    int quantize = 4;
+    int metronome_level = 100;
+};
+
 // ─── Device handle ────────────────────────────────────────────────────────────
 
 struct Device;
@@ -255,6 +268,10 @@ void display_raw   (Device* dev, uint8_t d0, uint8_t d1, uint8_t d2);
 bool is_sampling_standby   (const Device* dev);
 bool is_sampling_ready     (const Device* dev);
 bool is_recording          (const Device* dev);
+bool is_pattern_mode       (const Device* dev);
+bool is_pattern_recording  (const Device* dev);
+bool is_pattern_record_select(const Device* dev);
+bool is_pattern_erase_mode (const Device* dev);
 bool is_threshold_mode     (const Device* dev);
 bool is_start_end_level_mode(const Device* dev);
 bool is_time_bpm_mode      (const Device* dev);
@@ -277,6 +294,7 @@ int  consume_truncate_pad  (Device* dev); // -1 if none
 int  consume_delete_all_group(Device* dev); // -1 none, 0=A/B, 1=C/D
 bool consume_swap_pads     (Device* dev, int* pad_a, int* pad_b); // true if pending
 void set_mark_lit          (Device* dev, bool lit);
+void set_pad_playing       (Device* dev, int pad_index, bool playing);
 bool get_sampling_stereo   (const Device* dev);
 SampleQuality get_sampling_quality(const Device* dev);
 
@@ -285,12 +303,23 @@ int  get_last_sampling_target_pad(const Device* dev);  // -1 if never recorded
 int  get_sample_level_threshold  (const Device* dev);  // 0-8
 int  get_last_played_pad         (const Device* dev);  // -1 if none
 int  get_time_bpm_pad            (const Device* dev);  // -1 if none
+int  get_pattern_bpm             (const Device* dev);  // 40-200
+void set_pattern_bpm             (Device* dev, int bpm);
+int  get_pattern_record_slot     (const Device* dev);  // -1 if none
+int  get_pattern_metronome_level (const Device* dev);  // 0-127
 int  consume_record_bpm_quantize (Device* dev);        // -1 if none, else 40-200
 int  consume_mark_action         (Device* dev);        // 0 none, 1 start, 2 end, 3 reset full
 int  get_mark_edit_pad           (const Device* dev);  // -1 if none
+int  consume_pattern_trigger     (Device* dev);        // -1 if none
+int  consume_pattern_metronome   (Device* dev);        // 0 none, 1 weak, 2 strong
 bool get_pad_loop_mode           (const Device* dev, int pad_index); // false=one-shot
 bool get_pad_gate_mode           (const Device* dev, int pad_index); // false=trigger
 bool get_pad_reverse_mode        (const Device* dev, int pad_index); // false=forward
+void note_pattern_pad_played     (Device* dev, int pad_index);
+bool get_pattern_project_slot    (const Device* dev, int slot, PatternProjectSlot* out);
+bool set_pattern_project_slot    (Device* dev, int slot, const PatternProjectSlot& state);
+bool get_pattern_project_events  (const Device* dev, int slot, PatternProjectEvent* out_events, int max_events, int* out_count);
+bool set_pattern_project_events  (Device* dev, int slot, const PatternProjectEvent* events, int count);
 
 // Pad sample state (for UI display)
 bool pad_has_sample(const Device* dev, int pad_index);  // 0-31

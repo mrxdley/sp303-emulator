@@ -1,4 +1,5 @@
 #include "sp303.h"
+#include "pattern_sequencer.h"
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -8,6 +9,7 @@
 namespace sp303 {
 
 static constexpr uint32_t CORE_TAP_SAMPLE_RATE = 44100;
+static constexpr uint32_t TAP_TIMEOUT_SAMPLES = CORE_TAP_SAMPLE_RATE * 2;
 
 // ─── Metadata tables ──────────────────────────────────────────────────────────
 
@@ -183,6 +185,13 @@ const uint8_t SEG_LEV[3] = {
     SEG_C | SEG_D | SEG_E,                           // V approximation
 };
 
+// "ErS": E, r, S
+const uint8_t SEG_ERS[3] = {
+    SEG_A | SEG_D | SEG_E | SEG_F | SEG_G,           // E
+    SEG_E | SEG_G,                                   // r
+    SEG_A | SEG_C | SEG_D | SEG_F | SEG_G,           // S
+};
+
 // "Pit": P, i, t
 const uint8_t SEG_PIT[3] = {
     SEG_A | SEG_B | SEG_E | SEG_F | SEG_G,           // P
@@ -283,6 +292,28 @@ struct Device {
     bool bpm_armed_for_next_sample;
     bool time_bpm_mode;
     int time_bpm_pad;
+    bool pattern_mode;
+    bool pattern_bpm_edit_mode;
+    bool pattern_record_select;
+    bool pattern_recording;
+    bool pattern_erase_mode;
+    bool pattern_metronome_edit_mode;
+    bool pattern_length_edit_mode;
+    bool pattern_quantize_edit_mode;
+    bool pattern_delete_select;
+    bool pattern_delete_all_select;
+    bool pattern_delete_all_armed;
+    bool pattern_swap_select_a;
+    bool pattern_swap_select_b;
+    int pattern_record_slot;
+    int pattern_delete_slot;
+    int pattern_delete_all_group;
+    int pattern_swap_a;
+    int pattern_swap_b;
+    int pattern_tap_display_value;
+    int pattern_tap_display_frames;
+    uint32_t pattern_tap_times[4];
+    int pattern_tap_count;
     uint32_t tap_times[4];
     int tap_count;
     int pending_record_bpm_quantize;
@@ -293,8 +324,10 @@ struct Device {
     bool pad_loop_mode[32];
     bool pad_gate_mode[32];
     bool pad_reverse_mode[32];
+    bool pad_is_playing[32];
 
     bool pad_has_sample[32];
+    PatternSequencer pattern_seq;
 
     int  active_effect_btn;     // -1 or ButtonID of globally active effect
     bool pad_has_effect[32];    // true if pad carries the active effect
@@ -305,6 +338,21 @@ struct Device {
 };
 
 void finish_threshold_recording(Device* dev);
+
+static bool pattern_ui_active(const Device* dev) {
+    return dev && (dev->pattern_mode ||
+                   dev->pattern_record_select ||
+                   dev->pattern_recording ||
+                   dev->pattern_delete_select ||
+                   dev->pattern_delete_all_select ||
+                   dev->pattern_delete_all_armed ||
+                   dev->pattern_swap_select_a ||
+                   dev->pattern_swap_select_b);
+}
+
+static bool pattern_mode_active(const Device* dev) {
+    return dev && (pattern_ui_active(dev) || pattern_is_playing(&dev->pattern_seq));
+}
 
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 
@@ -353,6 +401,28 @@ Device* create() {
     dev->bpm_armed_for_next_sample = false;
     dev->time_bpm_mode = false;
     dev->time_bpm_pad = -1;
+    dev->pattern_mode = false;
+    dev->pattern_bpm_edit_mode = false;
+    dev->pattern_record_select = false;
+    dev->pattern_recording = false;
+    dev->pattern_erase_mode = false;
+    dev->pattern_metronome_edit_mode = false;
+    dev->pattern_length_edit_mode = false;
+    dev->pattern_quantize_edit_mode = false;
+    dev->pattern_delete_select = false;
+    dev->pattern_delete_all_select = false;
+    dev->pattern_delete_all_armed = false;
+    dev->pattern_swap_select_a = false;
+    dev->pattern_swap_select_b = false;
+    dev->pattern_record_slot = -1;
+    dev->pattern_delete_slot = -1;
+    dev->pattern_delete_all_group = -1;
+    dev->pattern_swap_a = -1;
+    dev->pattern_swap_b = -1;
+    dev->pattern_tap_display_value = 120;
+    dev->pattern_tap_display_frames = 0;
+    std::memset(dev->pattern_tap_times, 0, sizeof(dev->pattern_tap_times));
+    dev->pattern_tap_count = 0;
     std::memset(dev->tap_times, 0, sizeof(dev->tap_times));
     dev->tap_count = 0;
     dev->pending_record_bpm_quantize = -1;
@@ -370,6 +440,7 @@ Device* create() {
     dev->active_effect_btn = -1;
     std::memset(dev->pad_has_effect, 0, sizeof(dev->pad_has_effect));
     dev->mfx_type = 0;
+    pattern_init(&dev->pattern_seq);
 
     dev->blink_phase = 0;
     dev->blink_on = false;
@@ -411,6 +482,65 @@ static void set_display_number_plain(Device* dev, int value) {
     dev->state.display.digit[0] = (hundreds > 0) ? SEG_DIGITS[hundreds] : SEG_BLANK;
     dev->state.display.digit[1] = (n >= 10)      ? SEG_DIGITS[tens]     : SEG_BLANK;
     dev->state.display.digit[2] = SEG_DIGITS[ones];
+}
+
+static void set_display_measure_beat(Device* dev, int measure, int beat) {
+    if (!dev) return;
+    int m = std::clamp(measure, 1, 99);
+    int b = std::clamp(beat, 1, 4);
+    if (m >= 10) {
+        dev->state.display.digit[0] = SEG_DIGITS[(m / 10) % 10];
+        dev->state.display.digit[1] = SEG_DIGITS[m % 10] | SEG_DP;
+        dev->state.display.digit[2] = SEG_DIGITS[b];
+    } else {
+        dev->state.display.digit[0] = SEG_BLANK;
+        dev->state.display.digit[1] = SEG_DIGITS[m] | SEG_DP;
+        dev->state.display.digit[2] = SEG_DIGITS[b];
+    }
+}
+
+static void clear_pattern_edit_modes(Device* dev) {
+    if (!dev) return;
+    dev->pattern_bpm_edit_mode = false;
+    dev->pattern_metronome_edit_mode = false;
+    dev->pattern_length_edit_mode = false;
+    dev->pattern_quantize_edit_mode = false;
+}
+
+static void clear_pattern_management_modes(Device* dev) {
+    if (!dev) return;
+    dev->pattern_erase_mode = false;
+    dev->pattern_delete_select = false;
+    dev->pattern_delete_all_select = false;
+    dev->pattern_delete_all_armed = false;
+    dev->pattern_swap_select_a = false;
+    dev->pattern_swap_select_b = false;
+    dev->pattern_delete_slot = -1;
+    dev->pattern_delete_all_group = -1;
+    dev->pattern_swap_a = -1;
+    dev->pattern_swap_b = -1;
+    for (int i = 0; i < 32; ++i) {
+        pattern_set_erase_pad(&dev->pattern_seq, i, false);
+    }
+}
+
+static void tap_record(uint32_t* times, int* count, uint32_t now) {
+    if (!times || !count) return;
+    if (*count > 0) {
+        uint32_t last = times[*count - 1];
+        if ((now - last) > TAP_TIMEOUT_SAMPLES) {
+            std::memset(times, 0, sizeof(uint32_t) * 4);
+            *count = 0;
+        }
+    }
+    if (*count < 4) {
+        times[(*count)++] = now;
+    } else {
+        times[0] = times[1];
+        times[1] = times[2];
+        times[2] = times[3];
+        times[3] = now;
+    }
 }
 
 // ─── Input ────────────────────────────────────────────────────────────────────
@@ -458,9 +588,272 @@ void button_down(Device* dev, ButtonID btn) {
         display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);
     }
 
+    if (btn == BTN_PATTERN_SELECT && dev->sampling_state == SAMPLING_IDLE) {
+        if (dev->pattern_recording) {
+            pattern_stop_record(&dev->pattern_seq);
+            pattern_stop(&dev->pattern_seq);
+            dev->pattern_recording = false;
+            dev->pattern_record_slot = -1;
+        }
+        if (pattern_ui_active(dev)) {
+            dev->pattern_mode = false;
+            dev->pattern_record_select = false;
+            clear_pattern_edit_modes(dev);
+            clear_pattern_management_modes(dev);
+            display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);
+        } else {
+            dev->pattern_mode = true;
+            dev->pattern_record_select = false;
+            dev->pattern_recording = false;
+            dev->pattern_record_slot = -1;
+            clear_pattern_edit_modes(dev);
+            clear_pattern_management_modes(dev);
+            display_raw(dev, SEG_PTN[0], SEG_PTN[1], SEG_PTN[2]);
+        }
+        return;
+    }
+
+    if (pattern_mode_active(dev) && dev->sampling_state == SAMPLING_IDLE) {
+        if (btn >= BTN_BANK_A && btn <= BTN_BANK_D) {
+            uint8_t bank = static_cast<uint8_t>(btn - BTN_BANK_A);
+            dev->state.active_bank = bank;
+            for (int b = 0; b < 4; ++b)
+                dev->state.buttons[BTN_BANK_A + b].lit = (b == bank);
+            if (dev->pattern_delete_all_select || dev->pattern_delete_all_armed) {
+                dev->pattern_delete_all_select = false;
+                dev->pattern_delete_all_armed = true;
+                dev->pattern_delete_all_group = (bank <= 1) ? 0 : 1;
+            }
+            return;
+        }
+
+        if (btn == BTN_CANCEL) {
+            pattern_stop(&dev->pattern_seq);
+            dev->pattern_mode = true;
+            dev->pattern_record_select = false;
+            dev->pattern_recording = false;
+            dev->pattern_record_slot = -1;
+            clear_pattern_edit_modes(dev);
+            clear_pattern_management_modes(dev);
+            display_raw(dev, SEG_PTN[0], SEG_PTN[1], SEG_PTN[2]);
+            return;
+        }
+
+        if (dev->pattern_delete_all_select || dev->pattern_delete_all_armed) {
+            if (btn == BTN_DEL && dev->pattern_delete_all_group >= 0) {
+                int start = (dev->pattern_delete_all_group == 0) ? 0 : 16;
+                pattern_clear_range(&dev->pattern_seq, start, start + 16);
+                clear_pattern_management_modes(dev);
+                dev->pattern_mode = true;
+                display_raw(dev, SEG_PTN[0], SEG_PTN[1], SEG_PTN[2]);
+            }
+            return;
+        }
+
+        if (dev->pattern_swap_select_a || dev->pattern_swap_select_b) {
+            if (btn >= BTN_PAD_1 && btn <= BTN_PAD_32) {
+                int actual_slot = btn - BTN_PAD_1;
+                if (dev->pattern_swap_select_a) {
+                    dev->pattern_swap_a = actual_slot;
+                    dev->pattern_swap_b = -1;
+                    dev->pattern_swap_select_a = false;
+                    dev->pattern_swap_select_b = true;
+                } else {
+                    dev->pattern_swap_b = actual_slot;
+                }
+                return;
+            }
+            if (btn == BTN_REC &&
+                dev->pattern_swap_select_b &&
+                dev->pattern_swap_a >= 0 &&
+                dev->pattern_swap_b >= 0 &&
+                dev->pattern_swap_a != dev->pattern_swap_b) {
+                pattern_swap_slots(&dev->pattern_seq, dev->pattern_swap_a, dev->pattern_swap_b);
+                clear_pattern_management_modes(dev);
+                dev->pattern_mode = true;
+                display_raw(dev, SEG_PTN[0], SEG_PTN[1], SEG_PTN[2]);
+            }
+            return;
+        }
+
+        if (dev->pattern_delete_select) {
+            if (btn == BTN_REC && dev->state.buttons[BTN_DEL].pressed) {
+                clear_pattern_edit_modes(dev);
+                clear_pattern_management_modes(dev);
+                dev->pattern_swap_select_a = true;
+                dev->pattern_mode = true;
+                return;
+            }
+            if (btn >= BTN_PAD_1 && btn <= BTN_PAD_32) {
+                int actual_slot = btn - BTN_PAD_1;
+                if (pattern_has_data(&dev->pattern_seq, actual_slot)) {
+                    dev->pattern_delete_slot = actual_slot;
+                }
+                return;
+            }
+            if (btn == BTN_DEL && dev->pattern_delete_slot >= 0) {
+                pattern_clear_slot(&dev->pattern_seq, dev->pattern_delete_slot);
+                clear_pattern_management_modes(dev);
+                dev->pattern_mode = true;
+                display_raw(dev, SEG_PTN[0], SEG_PTN[1], SEG_PTN[2]);
+            }
+            return;
+        }
+
+        if (dev->pattern_erase_mode) {
+            if (btn == BTN_DEL) {
+                clear_pattern_management_modes(dev);
+            } else if (btn >= BTN_PAD_1 && btn <= BTN_PAD_32) {
+                int sample_slot = btn - BTN_PAD_1;
+                pattern_set_erase_pad(&dev->pattern_seq, sample_slot, true);
+            }
+            return;
+        }
+
+        if (btn == BTN_DEL) {
+            clear_pattern_edit_modes(dev);
+            if (dev->pattern_recording) {
+                dev->pattern_erase_mode = true;
+                return;
+            }
+            if (dev->state.buttons[BTN_CANCEL].pressed) {
+                clear_pattern_management_modes(dev);
+                dev->pattern_delete_all_select = true;
+                dev->pattern_mode = true;
+                return;
+            }
+            clear_pattern_management_modes(dev);
+            dev->pattern_delete_select = true;
+            dev->pattern_delete_slot = -1;
+            dev->pattern_mode = true;
+            return;
+        }
+
+        if (btn == BTN_REC && dev->state.buttons[BTN_DEL].pressed && !dev->pattern_recording) {
+            clear_pattern_edit_modes(dev);
+            clear_pattern_management_modes(dev);
+            dev->pattern_swap_select_a = true;
+            dev->pattern_mode = true;
+            return;
+        }
+
+        if (btn == BTN_TIME_BPM && !dev->pattern_recording) {
+            dev->pattern_bpm_edit_mode = !dev->pattern_bpm_edit_mode;
+            dev->pattern_metronome_edit_mode = false;
+            dev->pattern_length_edit_mode = false;
+            dev->pattern_quantize_edit_mode = false;
+            dev->pattern_tap_count = 0;
+            return;
+        }
+
+        if (btn == BTN_START_END_LEVEL && dev->pattern_record_select && dev->pattern_record_slot >= 0) {
+            dev->pattern_metronome_edit_mode = !dev->pattern_metronome_edit_mode;
+            dev->pattern_bpm_edit_mode = false;
+            dev->pattern_length_edit_mode = false;
+            dev->pattern_quantize_edit_mode = false;
+            return;
+        }
+
+        if (btn == BTN_LENGTH && dev->pattern_record_select && dev->pattern_record_slot >= 0) {
+            dev->pattern_length_edit_mode = !dev->pattern_length_edit_mode;
+            dev->pattern_metronome_edit_mode = false;
+            dev->pattern_bpm_edit_mode = false;
+            dev->pattern_quantize_edit_mode = false;
+            return;
+        }
+
+        if (btn == BTN_QUANTIZE && dev->pattern_record_slot >= 0) {
+            dev->pattern_quantize_edit_mode = !dev->pattern_quantize_edit_mode;
+            dev->pattern_metronome_edit_mode = false;
+            dev->pattern_bpm_edit_mode = false;
+            dev->pattern_length_edit_mode = false;
+            return;
+        }
+
+        if (btn == BTN_TAP_TEMPO) {
+            tap_record(dev->pattern_tap_times, &dev->pattern_tap_count, dev->sample_clock);
+            if (dev->pattern_tap_count >= 4) {
+                uint32_t d1 = dev->pattern_tap_times[1] - dev->pattern_tap_times[0];
+                uint32_t d2 = dev->pattern_tap_times[2] - dev->pattern_tap_times[1];
+                uint32_t d3 = dev->pattern_tap_times[3] - dev->pattern_tap_times[2];
+                float avg = (d1 + d2 + d3) / 3.0f;
+                if (avg > 1.0f) {
+                    int bpm = (int)std::lround((60.0f * CORE_TAP_SAMPLE_RATE) / avg);
+                    pattern_set_bpm(&dev->pattern_seq, bpm);
+                    dev->pattern_tap_display_value = pattern_get_bpm(&dev->pattern_seq);
+                    dev->pattern_tap_display_frames = 180;
+                }
+            }
+            return;
+        }
+
+        if (btn == BTN_REC) {
+            if (dev->pattern_recording) {
+                pattern_stop_record(&dev->pattern_seq);
+                pattern_stop(&dev->pattern_seq);
+                dev->pattern_recording = false;
+                dev->pattern_record_slot = -1;
+                dev->pattern_mode = true;
+                dev->pattern_record_select = false;
+                clear_pattern_edit_modes(dev);
+                clear_pattern_management_modes(dev);
+                display_raw(dev, SEG_PTN[0], SEG_PTN[1], SEG_PTN[2]);
+            } else if (dev->pattern_record_select && dev->pattern_record_slot >= 0) {
+                pattern_start_record(&dev->pattern_seq, dev->pattern_record_slot);
+                dev->pattern_recording = true;
+                dev->pattern_record_select = false;
+                dev->pattern_mode = true;
+                clear_pattern_edit_modes(dev);
+                clear_pattern_management_modes(dev);
+            } else {
+                pattern_stop(&dev->pattern_seq);
+                clear_pattern_management_modes(dev);
+                dev->pattern_record_select = true;
+                dev->pattern_record_slot = -1;
+                dev->pattern_mode = true;
+                clear_pattern_edit_modes(dev);
+            }
+            return;
+        }
+
+        if (!dev->pattern_recording && btn >= BTN_PAD_1 && btn <= BTN_PAD_32) {
+            int actual_slot = btn - BTN_PAD_1;
+
+            if (dev->pattern_record_select) {
+                dev->pattern_record_slot = actual_slot;
+                return;
+            }
+
+            if (pattern_has_data(&dev->pattern_seq, actual_slot)) {
+                if (pattern_is_playing(&dev->pattern_seq) &&
+                    pattern_get_current_slot(&dev->pattern_seq) == actual_slot) {
+                    pattern_stop(&dev->pattern_seq);
+                    dev->pattern_mode = true;
+                } else {
+                    pattern_start_playback(&dev->pattern_seq, actual_slot);
+                    dev->pattern_mode = false;
+                }
+            }
+            return;
+        }
+    }
+
     if (dev->sampling_state == SAMPLING_MARK_EDIT ||
         dev->sampling_state == SAMPLING_MARK_END_ONLY) {
         int mark_pad_btn = (dev->mark_edit_pad >= 0) ? (BTN_PAD_1 + dev->mark_edit_pad) : -1;
+        if (dev->sampling_state == SAMPLING_MARK_EDIT &&
+            dev->state.buttons[BTN_MARK].pressed &&
+            btn >= BTN_PAD_1 && btn <= BTN_PAD_8) {
+            int actual_pad = dev->state.active_bank * 8 + (btn - BTN_PAD_1);
+            if (dev->pad_has_sample[actual_pad]) {
+                dev->mark_pending_action = 0;
+                dev->mark_action_pad = -1;
+                dev->mark_edit_pad = actual_pad;
+                dev->last_played_pad = actual_pad;
+                dev->sampling_state = SAMPLING_MARK_END_ONLY;
+                return;
+            }
+        }
         if (btn == BTN_CANCEL) {
             dev->sampling_state = SAMPLING_IDLE;
             dev->mark_edit_pad = -1;
@@ -719,8 +1112,10 @@ void button_down(Device* dev, ButtonID btn) {
         if (dev->sampling_state == SAMPLING_IDLE &&
             dev->last_played_pad >= 0 &&
             dev->last_played_pad < 32 &&
-            dev->pad_has_sample[dev->last_played_pad]) {
-            if (dev->state.buttons[BTN_MARK].lit) {
+            dev->pad_has_sample[dev->last_played_pad] &&
+            dev->pad_is_playing[dev->last_played_pad]) {
+            if (dev->state.buttons[BTN_MARK].lit &&
+                dev->pad_is_playing[dev->last_played_pad]) {
                 dev->mark_pending_action = 3;
                 dev->mark_action_pad = dev->last_played_pad;
                 display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);
@@ -737,14 +1132,7 @@ void button_down(Device* dev, ButtonID btn) {
     if (btn == BTN_TAP_TEMPO &&
         dev->sampling_state == SAMPLING_STANDBY &&
         dev->bpm_edit_mode) {
-        if (dev->tap_count < 4) {
-            dev->tap_times[dev->tap_count++] = dev->sample_clock;
-        } else {
-            dev->tap_times[0] = dev->tap_times[1];
-            dev->tap_times[1] = dev->tap_times[2];
-            dev->tap_times[2] = dev->tap_times[3];
-            dev->tap_times[3] = dev->sample_clock;
-        }
+        tap_record(dev->tap_times, &dev->tap_count, dev->sample_clock);
         if (dev->tap_count >= 4) {
             uint32_t d1 = dev->tap_times[1] - dev->tap_times[0];
             uint32_t d2 = dev->tap_times[2] - dev->tap_times[1];
@@ -833,7 +1221,9 @@ void button_down(Device* dev, ButtonID btn) {
     }
 
     if (btn == BTN_START_END_LEVEL) {
-        if (dev->sampling_state == SAMPLING_IDLE && dev->last_played_pad >= 0) {
+        if (dev->sampling_state == SAMPLING_IDLE &&
+            !pattern_mode_active(dev) &&
+            dev->last_played_pad >= 0) {
             dev->sampling_state = SAMPLING_EDIT;
             dev->edit_display_locked = false;
         }
@@ -964,7 +1354,8 @@ void button_down(Device* dev, ButtonID btn) {
         dev->state.buttons[BTN_MARK].pressed &&
         btn >= BTN_PAD_1 && btn <= BTN_PAD_8) {
         int actual_pad = dev->state.active_bank * 8 + (btn - BTN_PAD_1);
-        if (dev->pad_has_sample[actual_pad]) {
+        if (dev->pad_has_sample[actual_pad] &&
+            dev->pad_is_playing[actual_pad]) {
             dev->mark_edit_pad = actual_pad;
             dev->last_played_pad = actual_pad;
             dev->sampling_state = SAMPLING_MARK_END_ONLY;
@@ -976,6 +1367,12 @@ void button_down(Device* dev, ButtonID btn) {
 void button_up(Device* dev, ButtonID btn) {
     if (!dev || btn < 0 || btn >= BTN_COUNT) return;
     dev->state.buttons[btn].pressed = false;
+
+    if (dev->pattern_erase_mode &&
+        btn >= BTN_PAD_1 && btn <= BTN_PAD_32) {
+        int sample_slot = btn - BTN_PAD_1;
+        pattern_set_erase_pad(&dev->pattern_seq, sample_slot, false);
+    }
 
     if (dev->sampling_state == SAMPLING_MARK_EDIT &&
         dev->mark_edit_pad >= 0 &&
@@ -989,6 +1386,32 @@ void knob_set(Device* dev, KnobID knob, float value) {
     if (!dev || knob < 0 || knob >= KNOB_COUNT) return;
     float clamped = std::clamp(value, 0.0f, 1.0f);
     dev->state.knobs[knob].value = clamped;
+
+    if (knob == KNOB_RESONANCE &&
+        dev->sampling_state == SAMPLING_IDLE &&
+        dev->pattern_mode &&
+        dev->pattern_bpm_edit_mode) {
+        int bpm = 40 + (int)std::lround(clamped * 160.0f);
+        pattern_set_bpm(&dev->pattern_seq, bpm);
+    }
+    if (knob == KNOB_DRIVE &&
+        dev->sampling_state == SAMPLING_IDLE &&
+        dev->pattern_record_slot >= 0) {
+        if (dev->pattern_metronome_edit_mode) {
+            pattern_set_metronome_level(&dev->pattern_seq, dev->pattern_record_slot,
+                std::clamp((int)std::lround(clamped * 127.0f), 0, 127));
+        } else if (dev->pattern_length_edit_mode) {
+            int measures = (clamped <= 0.0f) ? 1 : std::clamp((int)std::lround(1.0f + clamped * 98.0f), 1, 99);
+            if (measures > 20) {
+                int snapped = 20 + (int)std::lround((measures - 20) / 4.0f) * 4;
+                measures = std::clamp(snapped, 20, 99);
+            }
+            pattern_set_length_measures(&dev->pattern_seq, dev->pattern_record_slot, measures);
+        } else if (dev->pattern_quantize_edit_mode) {
+            int idx = std::clamp((int)std::lround(clamped * 4.0f), 0, 4);
+            pattern_set_quantize(&dev->pattern_seq, dev->pattern_record_slot, (PatternQuantize)idx);
+        }
+    }
 
     if (knob == KNOB_RESONANCE &&
         dev->sampling_state == SAMPLING_STANDBY &&
@@ -1036,6 +1459,7 @@ void tick(Device* dev, uint32_t samples_elapsed) {
 
     dev->blink_phase = (dev->blink_phase + 1) % 60;
     dev->blink_on = (dev->blink_phase < 30);
+    pattern_advance(&dev->pattern_seq, samples_elapsed, CORE_TAP_SAMPLE_RATE);
 
     for (int i = 0; i < 32; ++i) {
         if (dev->pad_led_hold_frames[i] > 0) dev->pad_led_hold_frames[i]--;
@@ -1046,12 +1470,16 @@ void tick(Device* dev, uint32_t samples_elapsed) {
         dev->sampling_state != SAMPLING_RESAMPLE_ARMED) {
         dev->rec_gain_display_frames--;
     }
+    if (dev->pattern_tap_display_frames > 0) {
+        dev->pattern_tap_display_frames--;
+    }
 
     // ─── Update LED states ────────────────────────────────────────────────────
 
     dev->state.buttons[BTN_REC].lit = false;
     dev->state.buttons[BTN_START_END_LEVEL].lit = false;
     dev->state.buttons[BTN_TIME_BPM].lit = false;
+    dev->state.buttons[BTN_PATTERN_SELECT].lit = false;
     dev->state.buttons[BTN_DEL].lit = false;
     dev->state.buttons[BTN_RESAMPLE].lit = false;
     dev->state.buttons[BTN_GATE].lit = false;
@@ -1068,7 +1496,149 @@ void tick(Device* dev, uint32_t samples_elapsed) {
         dev->state.buttons[BTN_PAD_1 + i].lit = false;
     }
 
-    if (dev->sampling_state == SAMPLING_IDLE) {
+    if (dev->sampling_state == SAMPLING_IDLE && pattern_mode_active(dev)) {
+        dev->state.buttons[BTN_PATTERN_SELECT].lit = pattern_ui_active(dev);
+        dev->state.buttons[BTN_TIME_BPM].lit = dev->pattern_bpm_edit_mode;
+        dev->state.buttons[BTN_START_END_LEVEL].lit = dev->pattern_metronome_edit_mode;
+        dev->state.buttons[BTN_LENGTH].lit = dev->pattern_length_edit_mode;
+        dev->state.buttons[BTN_QUANTIZE].lit = dev->pattern_quantize_edit_mode;
+
+        int bank_start = dev->state.active_bank * 8;
+        int playing_slot = pattern_get_current_slot(&dev->pattern_seq);
+        int record_slot = dev->pattern_record_slot;
+
+        if (dev->pattern_recording) {
+            dev->state.buttons[BTN_REC].lit = true;
+            dev->state.buttons[BTN_DEL].lit = dev->pattern_erase_mode;
+            if (record_slot >= bank_start && record_slot < bank_start + 8) {
+                dev->state.buttons[BTN_PAD_1 + (record_slot - bank_start)].lit = true;
+            }
+            if (dev->pattern_erase_mode) {
+                display_raw(dev, SEG_ERS[0], SEG_ERS[1], SEG_ERS[2]);
+            } else if (dev->pattern_quantize_edit_mode) {
+                PatternQuantize q = pattern_get_quantize(&dev->pattern_seq, record_slot);
+                if (q == PATTERN_QUANTIZE_OFF) {
+                    display_raw(dev, SEG_OFF[0], SEG_OFF[1], SEG_OFF[2]);
+                } else if (q == PATTERN_QUANTIZE_4) {
+                    display_raw(dev, SEG_BLANK, SEG_BLANK, SEG_DIGITS[4]);
+                } else if (q == PATTERN_QUANTIZE_8) {
+                    display_raw(dev, SEG_BLANK, SEG_BLANK, SEG_DIGITS[8]);
+                } else if (q == PATTERN_QUANTIZE_8T) {
+                    display_raw(dev, SEG_DIGITS[8], SEG_DASH, SEG_DIGITS[3]);
+                } else {
+                    display_raw(dev, SEG_BLANK, SEG_DIGITS[1], SEG_DIGITS[6]);
+                }
+            } else if (pattern_is_count_in(&dev->pattern_seq)) {
+                display_raw(dev, SEG_DASH, SEG_DIGITS[pattern_get_count_in_beat(&dev->pattern_seq)], SEG_BLANK);
+            } else {
+                set_display_measure_beat(dev,
+                                         pattern_get_current_measure(&dev->pattern_seq),
+                                         pattern_get_current_beat(&dev->pattern_seq));
+            }
+        } else if (dev->pattern_delete_all_select || dev->pattern_delete_all_armed) {
+            dev->state.buttons[BTN_DEL].lit = !dev->pattern_delete_all_armed || dev->blink_on;
+            if (dev->pattern_delete_all_armed) {
+                if (dev->pattern_delete_all_group == 0) {
+                    dev->state.buttons[BTN_BANK_A].lit = true;
+                    dev->state.buttons[BTN_BANK_B].lit = true;
+                } else if (dev->pattern_delete_all_group == 1) {
+                    dev->state.buttons[BTN_BANK_C].lit = true;
+                    dev->state.buttons[BTN_BANK_D].lit = true;
+                }
+            } else {
+                dev->state.buttons[BTN_BANK_A].lit = dev->blink_on;
+                dev->state.buttons[BTN_BANK_B].lit = dev->blink_on;
+                dev->state.buttons[BTN_BANK_C].lit = dev->blink_on;
+                dev->state.buttons[BTN_BANK_D].lit = dev->blink_on;
+            }
+            display_raw(dev, SEG_DAL[0], SEG_DAL[1], SEG_DAL[2]);
+        } else if (dev->pattern_swap_select_a || dev->pattern_swap_select_b) {
+            dev->state.buttons[BTN_DEL].lit = true;
+            dev->state.buttons[BTN_REC].lit = dev->pattern_swap_select_b ? dev->blink_on : true;
+            for (int i = 0; i < 8; ++i) {
+                int slot = bank_start + i;
+                if (pattern_has_data(&dev->pattern_seq, slot)) {
+                    dev->state.buttons[BTN_PAD_1 + i].lit = dev->blink_on;
+                }
+            }
+            if (dev->pattern_swap_a >= bank_start && dev->pattern_swap_a < bank_start + 8) {
+                dev->state.buttons[BTN_PAD_1 + (dev->pattern_swap_a - bank_start)].lit = true;
+            }
+            if (dev->pattern_swap_b >= bank_start && dev->pattern_swap_b < bank_start + 8) {
+                dev->state.buttons[BTN_PAD_1 + (dev->pattern_swap_b - bank_start)].lit = true;
+            }
+            display_raw(dev, SEG_CHG[0], SEG_CHG[1], SEG_CHG[2]);
+        } else if (dev->pattern_delete_select) {
+            dev->state.buttons[BTN_DEL].lit = (dev->pattern_delete_slot >= 0) ? dev->blink_on : true;
+            for (int i = 0; i < 8; ++i) {
+                int slot = bank_start + i;
+                if (pattern_has_data(&dev->pattern_seq, slot)) {
+                    dev->state.buttons[BTN_PAD_1 + i].lit = dev->blink_on;
+                }
+            }
+            if (dev->pattern_delete_slot >= bank_start && dev->pattern_delete_slot < bank_start + 8) {
+                dev->state.buttons[BTN_PAD_1 + (dev->pattern_delete_slot - bank_start)].lit = true;
+            }
+            display_raw(dev, SEG_DEL[0], SEG_DEL[1], SEG_DEL[2]);
+        } else if (dev->pattern_record_select) {
+            dev->state.buttons[BTN_REC].lit = (record_slot >= 0) ? dev->blink_on : true;
+            if (record_slot < 0) {
+                for (int i = 0; i < 8; ++i) {
+                    int slot = bank_start + i;
+                    if (!pattern_has_data(&dev->pattern_seq, slot)) {
+                        dev->state.buttons[BTN_PAD_1 + i].lit = dev->blink_on;
+                    }
+                }
+            }
+            if (record_slot >= bank_start && record_slot < bank_start + 8) {
+                dev->state.buttons[BTN_PAD_1 + (record_slot - bank_start)].lit = true;
+            }
+            if (record_slot >= 0) {
+                if (dev->pattern_metronome_edit_mode) {
+                    set_display_number_plain(dev, pattern_get_metronome_level(&dev->pattern_seq, record_slot));
+                } else if (dev->pattern_bpm_edit_mode) {
+                    set_display_number_plain(dev, pattern_get_bpm(&dev->pattern_seq));
+                } else if (dev->pattern_length_edit_mode) {
+                    set_display_number_plain(dev, pattern_get_length_measures(&dev->pattern_seq, record_slot));
+                } else if (dev->pattern_quantize_edit_mode) {
+                    PatternQuantize q = pattern_get_quantize(&dev->pattern_seq, record_slot);
+                    if (q == PATTERN_QUANTIZE_OFF) {
+                        display_raw(dev, SEG_OFF[0], SEG_OFF[1], SEG_OFF[2]);
+                    } else if (q == PATTERN_QUANTIZE_4) {
+                        display_raw(dev, SEG_BLANK, SEG_BLANK, SEG_DIGITS[4]);
+                    } else if (q == PATTERN_QUANTIZE_8) {
+                        display_raw(dev, SEG_BLANK, SEG_BLANK, SEG_DIGITS[8]);
+                    } else if (q == PATTERN_QUANTIZE_8T) {
+                        display_raw(dev, SEG_DIGITS[8], SEG_DASH, SEG_DIGITS[3]);
+                    } else {
+                        display_raw(dev, SEG_BLANK, SEG_DIGITS[1], SEG_DIGITS[6]);
+                    }
+                } else {
+                    display_raw(dev, SEG_REC[0], SEG_REC[1], SEG_REC[2]);
+                }
+            } else {
+                display_raw(dev, SEG_REC[0], SEG_REC[1], SEG_REC[2]);
+            }
+        } else {
+            for (int i = 0; i < 8; ++i) {
+                int slot = bank_start + i;
+                if (pattern_has_data(&dev->pattern_seq, slot)) {
+                    dev->state.buttons[BTN_PAD_1 + i].lit = dev->blink_on;
+                }
+            }
+            if (playing_slot >= bank_start && playing_slot < bank_start + 8) {
+                dev->state.buttons[BTN_PAD_1 + (playing_slot - bank_start)].lit = true;
+            }
+            if (dev->pattern_tap_display_frames > 0) {
+                set_display_number_plain(dev, dev->pattern_tap_display_value);
+            } else if (dev->pattern_bpm_edit_mode) {
+                set_display_number_plain(dev, pattern_get_bpm(&dev->pattern_seq));
+            } else {
+                display_raw(dev, SEG_PTN[0], SEG_PTN[1], SEG_PTN[2]);
+            }
+        }
+    }
+    else if (dev->sampling_state == SAMPLING_IDLE) {
         dev->state.buttons[BTN_TIME_BPM].lit = dev->time_bpm_mode;
         int bank_start = dev->state.active_bank * 8;
         for (int i = 0; i < 8; ++i) {
@@ -1326,7 +1896,9 @@ void tick(Device* dev, uint32_t samples_elapsed) {
         display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);
     }
 
-    if (dev->last_played_pad >= 0 && dev->last_played_pad < 32 &&
+    if (!pattern_mode_active(dev) &&
+        !is_delete_mode(dev) &&
+        dev->last_played_pad >= 0 && dev->last_played_pad < 32 &&
         dev->pad_has_sample[dev->last_played_pad]) {
         dev->state.buttons[BTN_LOOP].lit = dev->pad_loop_mode[dev->last_played_pad];
         dev->state.buttons[BTN_GATE].lit = dev->pad_gate_mode[dev->last_played_pad];
@@ -1390,6 +1962,25 @@ bool is_recording(const Device* dev) {
     if (!dev) return false;
     return dev->sampling_state == SAMPLING_RECORDING ||
            dev->sampling_state == SAMPLING_RESAMPLE_RECORDING;
+}
+
+bool is_pattern_mode(const Device* dev) {
+    return pattern_mode_active(dev);
+}
+
+bool is_pattern_recording(const Device* dev) {
+    if (!dev) return false;
+    return dev->pattern_recording;
+}
+
+bool is_pattern_record_select(const Device* dev) {
+    if (!dev) return false;
+    return dev->pattern_record_select;
+}
+
+bool is_pattern_erase_mode(const Device* dev) {
+    if (!dev) return false;
+    return dev->pattern_erase_mode;
 }
 
 bool is_threshold_mode(const Device* dev) {
@@ -1477,6 +2068,26 @@ int get_time_bpm_pad(const Device* dev) {
     return dev->time_bpm_pad;
 }
 
+int get_pattern_bpm(const Device* dev) {
+    if (!dev) return 120;
+    return pattern_get_bpm(&dev->pattern_seq);
+}
+
+void set_pattern_bpm(Device* dev, int bpm) {
+    if (!dev) return;
+    pattern_set_bpm(&dev->pattern_seq, bpm);
+}
+
+int get_pattern_record_slot(const Device* dev) {
+    if (!dev) return -1;
+    return dev->pattern_record_slot;
+}
+
+int get_pattern_metronome_level(const Device* dev) {
+    if (!dev || dev->pattern_record_slot < 0) return 100;
+    return pattern_get_metronome_level(&dev->pattern_seq, dev->pattern_record_slot);
+}
+
 int consume_record_bpm_quantize(Device* dev) {
     if (!dev) return -1;
     int bpm = dev->pending_record_bpm_quantize;
@@ -1489,6 +2100,16 @@ int consume_mark_action(Device* dev) {
     int action = dev->mark_pending_action;
     dev->mark_pending_action = 0;
     return action;
+}
+
+int consume_pattern_trigger(Device* dev) {
+    if (!dev) return -1;
+    return pattern_consume_trigger(&dev->pattern_seq);
+}
+
+int consume_pattern_metronome(Device* dev) {
+    if (!dev) return 0;
+    return pattern_consume_metronome(&dev->pattern_seq);
 }
 
 int get_mark_edit_pad(const Device* dev) {
@@ -1559,6 +2180,61 @@ void note_pad_played(Device* dev, int pad_index) {
     if (!dev || pad_index < 0 || pad_index >= 32) return;
     dev->last_played_pad = pad_index;
     dev->pad_led_hold_frames[pad_index] = 180;
+    if (dev->pattern_recording) {
+        pattern_record_pad_hit(&dev->pattern_seq, pad_index);
+    }
+}
+
+void note_pattern_pad_played(Device* dev, int pad_index) {
+    if (!dev || pad_index < 0 || pad_index >= 32) return;
+    dev->last_played_pad = pad_index;
+}
+
+bool get_pattern_project_slot(const Device* dev, int slot, PatternProjectSlot* out) {
+    if (!dev || !out || slot < 0 || slot >= 32) return false;
+    out->assigned = pattern_has_data(&dev->pattern_seq, slot);
+    out->length_measures = pattern_get_length_measures(&dev->pattern_seq, slot);
+    out->quantize = (int)pattern_get_quantize(&dev->pattern_seq, slot);
+    out->metronome_level = pattern_get_metronome_level(&dev->pattern_seq, slot);
+    return true;
+}
+
+bool set_pattern_project_slot(Device* dev, int slot, const PatternProjectSlot& state) {
+    if (!dev || slot < 0 || slot >= 32) return false;
+    pattern_set_length_measures(&dev->pattern_seq, slot, state.length_measures);
+    pattern_set_quantize(&dev->pattern_seq, slot, (PatternQuantize)std::clamp(state.quantize, 0, 4));
+    pattern_set_metronome_level(&dev->pattern_seq, slot, state.metronome_level);
+    if (!state.assigned) {
+        pattern_clear_events(&dev->pattern_seq, slot);
+    }
+    return true;
+}
+
+bool get_pattern_project_events(const Device* dev, int slot, PatternProjectEvent* out_events, int max_events, int* out_count) {
+    if (!dev || slot < 0 || slot >= 32 || !out_count) return false;
+    int count = pattern_get_event_count(&dev->pattern_seq, slot);
+    *out_count = count;
+    if (!out_events || max_events <= 0) return true;
+    int n = std::min(count, max_events);
+    for (int i = 0; i < n; ++i) {
+        PatternEvent ev{};
+        if (!pattern_get_event(&dev->pattern_seq, slot, i, &ev)) return false;
+        out_events[i].tick = ev.tick;
+        out_events[i].sample_pad = ev.sample_pad;
+    }
+    return true;
+}
+
+bool set_pattern_project_events(Device* dev, int slot, const PatternProjectEvent* events, int count) {
+    if (!dev || slot < 0 || slot >= 32 || count < 0) return false;
+    pattern_clear_events(&dev->pattern_seq, slot);
+    for (int i = 0; i < count; ++i) {
+        PatternEvent ev{};
+        ev.tick = events[i].tick;
+        ev.sample_pad = events[i].sample_pad;
+        if (!pattern_append_event(&dev->pattern_seq, slot, ev)) return false;
+    }
+    return true;
 }
 
 void set_edit_display_value(Device* dev, int value) {
@@ -1607,6 +2283,11 @@ bool consume_swap_pads(Device* dev, int* pad_a, int* pad_b) {
 void set_mark_lit(Device* dev, bool lit) {
     if (!dev) return;
     dev->state.buttons[BTN_MARK].lit = lit;
+}
+
+void set_pad_playing(Device* dev, int pad_index, bool playing) {
+    if (!dev || pad_index < 0 || pad_index >= 32) return;
+    dev->pad_is_playing[pad_index] = playing;
 }
 
 bool get_sampling_stereo(const Device* dev) {
@@ -1710,11 +2391,35 @@ void reset_project_state(Device* dev) {
     dev->bpm_armed_for_next_sample = false;
     dev->time_bpm_mode = false;
     dev->time_bpm_pad = -1;
+    dev->pattern_mode = false;
+    dev->pattern_bpm_edit_mode = false;
+    dev->pattern_record_select = false;
+    dev->pattern_recording = false;
+    dev->pattern_erase_mode = false;
+    dev->pattern_metronome_edit_mode = false;
+    dev->pattern_length_edit_mode = false;
+    dev->pattern_quantize_edit_mode = false;
+    dev->pattern_delete_select = false;
+    dev->pattern_delete_all_select = false;
+    dev->pattern_delete_all_armed = false;
+    dev->pattern_swap_select_a = false;
+    dev->pattern_swap_select_b = false;
+    dev->pattern_record_slot = -1;
+    dev->pattern_delete_slot = -1;
+    dev->pattern_delete_all_group = -1;
+    dev->pattern_swap_a = -1;
+    dev->pattern_swap_b = -1;
+    dev->pattern_tap_display_value = 120;
+    dev->pattern_tap_display_frames = 0;
+    std::memset(dev->pattern_tap_times, 0, sizeof(dev->pattern_tap_times));
+    dev->pattern_tap_count = 0;
     dev->tap_count = 0;
+    std::memset(dev->tap_times, 0, sizeof(dev->tap_times));
     dev->pending_record_bpm_quantize = -1;
     dev->rec_gain_display_frames = 0;
     dev->rec_gain_value = 0;
     dev->active_effect_btn = -1;
+    pattern_reset(&dev->pattern_seq);
     dev->state.active_bank = 0;
     dev->state.buttons[BTN_BANK_A].lit = true;
     display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);

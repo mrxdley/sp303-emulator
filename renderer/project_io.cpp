@@ -13,7 +13,7 @@ using json = nlohmann::json;
 
 namespace {
 
-static constexpr int PROJECT_VERSION = 1;
+static constexpr int PROJECT_VERSION = 2;
 
 struct LoadedPad {
     sp303::PadProjectState state{};
@@ -201,7 +201,9 @@ ProjectIoResult project_save(const std::filesystem::path& project_dir,
     root["audio_sample_rate"] = cfg.sample_rate;
     root["sample_level_threshold"] = sp303::get_sample_level_threshold(dev);
     root["active_effect_button"] = sp303::get_active_effect_btn(dev);
+    root["pattern_bpm"] = sp303::get_pattern_bpm(dev);
     root["pads"] = json::array();
+    root["patterns"] = json::array();
 
     for (int slot = 0; slot < sp303::AUDIO_SLOTS; ++slot) {
         sp303::PadProjectState pad{};
@@ -242,6 +244,36 @@ ProjectIoResult project_save(const std::filesystem::path& project_dir,
         }
 
         root["pads"].push_back(jpad);
+    }
+
+    for (int slot = 0; slot < sp303::AUDIO_SLOTS; ++slot) {
+        sp303::PatternProjectSlot pslot{};
+        sp303::get_pattern_project_slot(dev, slot, &pslot);
+
+        json jslot;
+        jslot["slot"] = slot;
+        jslot["assigned"] = pslot.assigned;
+        jslot["length_measures"] = pslot.length_measures;
+        jslot["quantize"] = pslot.quantize;
+        jslot["metronome_level"] = pslot.metronome_level;
+        jslot["events"] = json::array();
+
+        int event_count = 0;
+        sp303::get_pattern_project_events(dev, slot, nullptr, 0, &event_count);
+        if (event_count > 0) {
+            std::vector<sp303::PatternProjectEvent> events((size_t)event_count);
+            if (!sp303::get_pattern_project_events(dev, slot, events.data(), event_count, &event_count)) {
+                return make_result(false, "save failed: could not export pattern events");
+            }
+            for (int i = 0; i < event_count; ++i) {
+                jslot["events"].push_back({
+                    {"tick", events[(size_t)i].tick},
+                    {"sample_pad", events[(size_t)i].sample_pad},
+                });
+            }
+        }
+
+        root["patterns"].push_back(jslot);
     }
 
     std::ofstream manifest(std::filesystem::path(temp_dir) / "project.json");
@@ -286,6 +318,9 @@ ProjectIoResult project_load(const std::filesystem::path& project_dir,
     }
     if (!root.contains("pads") || !root["pads"].is_array() || root["pads"].size() != sp303::AUDIO_SLOTS) {
         return make_result(false, "load failed: invalid pad list");
+    }
+    if (!root.contains("patterns") || !root["patterns"].is_array() || root["patterns"].size() != sp303::AUDIO_SLOTS) {
+        return make_result(false, "load failed: invalid pattern list");
     }
 
     std::vector<LoadedPad> loaded(sp303::AUDIO_SLOTS);
@@ -340,6 +375,7 @@ ProjectIoResult project_load(const std::filesystem::path& project_dir,
 
     sp303::set_sample_level_threshold(dev, std::clamp(root.value("sample_level_threshold", 5), 0, 8));
     sp303::set_active_effect_btn(dev, root.value("active_effect_button", -1));
+    sp303::set_pattern_bpm(dev, std::clamp(root.value("pattern_bpm", 120), 40, 200));
 
     for (int slot = 0; slot < sp303::AUDIO_SLOTS; ++slot) {
         const auto& src = loaded[slot];
@@ -354,6 +390,35 @@ ProjectIoResult project_load(const std::filesystem::path& project_dir,
             sp303::audio_set_sample_time_mode(audio, slot, src.time_mode, src.time_target_bpm);
         }
         sp303::set_pad_project_state(dev, slot, src.state);
+    }
+
+    for (const auto& jslot : root["patterns"]) {
+        int slot = jslot.value("slot", -1);
+        if (slot < 0 || slot >= sp303::AUDIO_SLOTS) {
+            return make_result(false, "load failed: invalid pattern slot");
+        }
+
+        sp303::PatternProjectSlot pslot{};
+        pslot.assigned = jslot.value("assigned", false);
+        pslot.length_measures = jslot.value("length_measures", 1);
+        pslot.quantize = jslot.value("quantize", 4);
+        pslot.metronome_level = jslot.value("metronome_level", 100);
+        if (!sp303::set_pattern_project_slot(dev, slot, pslot)) {
+            return make_result(false, "load failed: could not import pattern slot");
+        }
+
+        std::vector<sp303::PatternProjectEvent> events;
+        if (jslot.contains("events") && jslot["events"].is_array()) {
+            for (const auto& jev : jslot["events"]) {
+                sp303::PatternProjectEvent ev{};
+                ev.tick = jev.value("tick", 0);
+                ev.sample_pad = jev.value("sample_pad", 0);
+                events.push_back(ev);
+            }
+        }
+        if (!sp303::set_pattern_project_events(dev, slot, events.data(), (int)events.size())) {
+            return make_result(false, "load failed: could not import pattern events");
+        }
     }
 
     std::string message = "loaded project from " + project_dir.string();

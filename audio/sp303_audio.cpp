@@ -11,6 +11,8 @@
 
 namespace sp303 {
 
+static constexpr int METRONOME_MS = 35;
+
 static inline float read_sample_linear(const Sample& s, float frame_pos, uint32_t channel) {
     const uint32_t ch = std::min(channel, std::max(1u, s.channels) - 1u);
     const uint32_t frame_count = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
@@ -346,6 +348,29 @@ static void playback_cb(ma_device* dev, void* out_raw, const void*, ma_uint32 fr
     }
 
     const float gain = a->output_gain.load(std::memory_order_relaxed);
+    int metro_frames_left = a->metronome_frames_left.load(std::memory_order_relaxed);
+    const int metro_level = a->metronome_level.load(std::memory_order_relaxed);
+    const int metro_accent = a->metronome_accent.load(std::memory_order_relaxed);
+    if (metro_frames_left > 0 && metro_level > 0) {
+        const float amp = (metro_level / 127.0f) * (metro_accent == 2 ? 0.24f : 0.10f);
+        const float brightness = (metro_accent == 2) ? 0.92f : 0.42f;
+        const int total_click_frames = std::max(1, (int)(a->cfg.sample_rate * METRONOME_MS / 1000));
+        for (uint32_t f = 0; f < frames && metro_frames_left > 0; ++f, --metro_frames_left) {
+            a->metronome_noise_state = a->metronome_noise_state * 1664525u + 1013904223u;
+            float raw = (((a->metronome_noise_state >> 8) & 0xFFFFu) / 32767.5f) - 1.0f;
+            float click = raw - (a->metronome_prev_noise * brightness);
+            a->metronome_prev_noise = raw;
+            float env = metro_frames_left / (float)total_click_frames;
+            float accent_env = 1.0f;
+            if (metro_accent == 2) {
+                float attack = metro_frames_left / (float)total_click_frames;
+                accent_env = 0.75f + (attack * 0.75f);
+            }
+            float s = click * amp * env * accent_env;
+            out[f * 2] += s;
+            out[f * 2 + 1] += s;
+        }
+    }
     for (uint32_t i = 0; i < n; ++i) {
         out[i] *= gain;
         peak = std::max(peak, std::abs(out[i]));
@@ -358,6 +383,7 @@ static void playback_cb(ma_device* dev, void* out_raw, const void*, ma_uint32 fr
 
     a->output_peak.store(peak, std::memory_order_relaxed);
     a->stereo_diff_peak.store(stereo_diff_peak, std::memory_order_relaxed);
+    a->metronome_frames_left.store(metro_frames_left, std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> lock(a->rec_mutex);
@@ -653,6 +679,14 @@ void audio_set_pattern_bpm(Audio* a, int bpm) {
 int audio_get_pattern_bpm(Audio* a) {
     if (!a) return 120;
     return std::clamp(a->pattern_bpm.load(std::memory_order_relaxed), 40, 200);
+}
+
+void audio_trigger_metronome(Audio* a, int level, bool accent) {
+    if (!a) return;
+    a->metronome_level.store(std::clamp(level, 0, 127), std::memory_order_relaxed);
+    a->metronome_accent.store(accent ? 2 : 1, std::memory_order_relaxed);
+    a->metronome_frames_left.store((int)(a->cfg.sample_rate * METRONOME_MS / 1000), std::memory_order_relaxed);
+    a->metronome_prev_noise = 0.0f;
 }
 
 int audio_get_sample_playhead(Audio* a, int slot) {

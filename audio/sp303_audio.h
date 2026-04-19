@@ -69,6 +69,7 @@ int  audio_get_sample_time_mode(Audio* a, int slot);        // 0=off 1=custom 2=
 int  audio_get_sample_time_target_bpm(Audio* a, int slot);  // custom bpm or -1
 void audio_set_pattern_bpm(Audio* a, int bpm);              // 40-200
 int  audio_get_pattern_bpm(Audio* a);                       // 40-200
+void audio_trigger_metronome(Audio* a, int level, bool accent);
 int  audio_get_sample_playhead(Audio* a, int slot);         // 0-127 absolute within sample
 int  audio_get_pad_led_hold_frames(Audio* a, int slot, bool reverse); // playback length in UI frames + 3s tail
 

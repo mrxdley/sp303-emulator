@@ -639,11 +639,6 @@ int main(void) {
             std::printf("[PROJECT] %s\n", res.message.c_str());
         }
 
-        if (!config_open && IsKeyPressed(KEY_Q)) {
-            sp303::button_down(dev, sp303::BTN_CANCEL);
-            sp303::button_up(dev, sp303::BTN_CANCEL);
-        }
-
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && config_open) {
             // Config screen consumes all clicks
         }
@@ -677,13 +672,19 @@ int main(void) {
                     bool resample_dest = sp303::is_resample_dest_select(dev);
                     bool resample_armed = sp303::is_resample_armed(dev);
                     bool resample_recording = sp303::is_resample_recording(dev);
+                    bool pattern_mode = sp303::is_pattern_mode(dev);
+                    bool pattern_recording = sp303::is_pattern_recording(dev);
+                    bool pattern_erase_mode = sp303::is_pattern_erase_mode(dev);
                     for (int i = 0; i < 8; ++i) {
                         if (hit_btn(mx, my, layout.buttons[sp303::BTN_PAD_1 + i])) {
                             int pad_id = sp303::BTN_PAD_1 + cur.active_bank * 8 + i;
                             sp303::button_down(dev, (sp303::ButtonID)pad_id);
                             pressed_btn = pad_id;
                             int slot = pad_id - sp303::BTN_PAD_1;
-                            if (resample_source) {
+                            if (pattern_recording && !pattern_erase_mode) {
+                                sp303::note_pad_played(dev, slot);
+                                trigger_pad_audio(slot);
+                            } else if (resample_source) {
                                 sp303::note_pad_played(dev, slot);
                                 trigger_pad_audio(slot);
                             } else if (resample_armed) {
@@ -703,6 +704,7 @@ int main(void) {
                                 !sp303::is_recording(dev) &&
                                 !sp303::is_threshold_mode(dev) &&
                                 !sp303::is_delete_mode(dev) &&
+                                !pattern_mode &&
                                 !cur.buttons[sp303::BTN_REMAIN].pressed) {
                                 sp303::note_pad_played(dev, slot);
                                 trigger_pad_audio(slot);
@@ -773,6 +775,18 @@ int main(void) {
         }
 
         if (!shift && !config_open) {
+            if (IsKeyPressed(KEY_Q)) {
+                sp303::button_down(dev, sp303::BTN_CANCEL);
+                key_held[KEY_Q] = sp303::BTN_CANCEL;
+            }
+            if (IsKeyReleased(KEY_Q)) {
+                auto it = key_held.find(KEY_Q);
+                if (it != key_held.end()) {
+                    sp303::button_up(dev, it->second);
+                    key_held.erase(it);
+                }
+            }
+
             sp303::State cur = sp303::get_state(dev);
             bool sampling_active =
                 sp303::is_sampling_standby(dev) ||
@@ -785,6 +799,9 @@ int main(void) {
             bool resample_dest = sp303::is_resample_dest_select(dev);
             bool resample_armed = sp303::is_resample_armed(dev);
             bool resample_recording = sp303::is_resample_recording(dev);
+            bool pattern_mode = sp303::is_pattern_mode(dev);
+            bool pattern_recording = sp303::is_pattern_recording(dev);
+            bool pattern_erase_mode = sp303::is_pattern_erase_mode(dev);
             for (auto& [key, btn] : keymap) {
                 if (IsKeyPressed(key)) {
                     sp303::ButtonID actual = btn;
@@ -794,7 +811,10 @@ int main(void) {
                     key_held[key] = actual;
                     if (actual >= sp303::BTN_PAD_1 && actual <= sp303::BTN_PAD_32) {
                         int slot = actual - sp303::BTN_PAD_1;
-                        if (resample_source) {
+                        if (pattern_recording && !pattern_erase_mode) {
+                            sp303::note_pad_played(dev, slot);
+                            trigger_pad_audio(slot);
+                        } else if (resample_source) {
                             sp303::note_pad_played(dev, slot);
                             trigger_pad_audio(slot);
                         } else if (resample_armed) {
@@ -809,6 +829,7 @@ int main(void) {
                             }
                         } else if (!sampling_active &&
                                    !cur.buttons[sp303::BTN_REMAIN].pressed &&
+                                   !pattern_mode &&
                                    !resample_source &&
                                    !resample_dest) {
                             sp303::note_pad_played(dev, slot);

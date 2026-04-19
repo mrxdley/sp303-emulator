@@ -8,7 +8,10 @@ include(FetchContent)
 
 # ─── Core library ─────────────────────────────────────────────────────────────
 
-add_library(sp303 core/sp303.cpp)
+add_library(sp303
+    core/sp303.cpp
+    core/pattern_sequencer.cpp
+    core/memory_card.cpp)
 target_include_directories(sp303 PUBLIC core PRIVATE core)
 target_compile_options(sp303 PRIVATE -Wall -Wextra -Wpedantic)
 

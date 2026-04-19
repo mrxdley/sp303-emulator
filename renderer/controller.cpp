@@ -51,6 +51,24 @@ static float time_mode_to_knob(int mode, int target_bpm, int source_bpm) {
     return std::clamp((ratio - 0.5f) / 0.8f, 0.02f, 0.98f);
 }
 
+static bool knob_mode_owns_input_gain(sp303::Device* dev) {
+    return sp303::is_sampling_standby(dev) ||
+           sp303::is_sampling_ready(dev) ||
+           sp303::is_recording(dev) ||
+           sp303::is_resampling_mode(dev);
+}
+
+static bool knob_mode_owns_effect_params(sp303::Device* dev) {
+    return !sp303::is_start_end_level_mode(dev) &&
+           !sp303::is_time_bpm_mode(dev) &&
+           !sp303::is_sampling_standby(dev) &&
+           !sp303::is_sampling_ready(dev) &&
+           !sp303::is_recording(dev) &&
+           !sp303::is_threshold_mode(dev) &&
+           !sp303::is_delete_mode(dev) &&
+           !sp303::is_resampling_mode(dev);
+}
+
 static bool virtual_input_exists() {
     FILE* pipe = popen("pactl list sources 2>/dev/null | grep 'SP303_Input'", "r");
     if (!pipe) return false;
@@ -147,6 +165,10 @@ bool renderer_controller_init(RendererController* c) {
 
     std::printf("[SP-303] Output: %s\n", c->out_devs.empty() ? "(none)" : c->out_devs[c->sel_out].name);
     std::printf("[SP-303] Input:  %s\n", c->in_devs.empty() ? "(none)" : c->in_devs[c->sel_in].name);
+    c->cached_input_gain = 0.8f;
+    c->cached_fx_p1 = 0.5f;
+    c->cached_fx_p2 = 0.5f;
+    c->cached_fx_p3 = 0.5f;
     return true;
 }
 
@@ -188,6 +210,9 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     if (!c || !c->audio) return state;
 
     sp303::Audio* audio = c->audio;
+    for (int i = 0; i < 32; ++i) {
+        sp303::set_pad_playing(dev, i, sp303::audio_is_playing(audio, i));
+    }
     sp303::audio_set_recording_mode(audio,
                                     sp303::get_sampling_stereo(dev),
                                     to_audio_quality(sp303::get_sampling_quality(dev)));
@@ -209,8 +234,22 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     }
     c->config_input_peak = input_peak;
 
-    float input_gain = state.knobs[sp303::KNOB_DRIVE].value;
-    sp303::audio_set_input_gain(audio, input_gain);
+    bool input_gain_mode = knob_mode_owns_input_gain(dev);
+    bool effect_param_mode = knob_mode_owns_effect_params(dev);
+    if (input_gain_mode && !c->was_input_gain_mode) {
+        sp303::knob_set(dev, sp303::KNOB_DRIVE, c->cached_input_gain);
+        state = sp303::get_state(dev);
+    }
+    if (input_gain_mode) {
+        c->cached_input_gain = state.knobs[sp303::KNOB_DRIVE].value;
+    }
+    if (effect_param_mode) {
+        c->cached_fx_p1 = state.knobs[sp303::KNOB_CUTOFF].value;
+        c->cached_fx_p2 = state.knobs[sp303::KNOB_RESONANCE].value;
+        c->cached_fx_p3 = state.knobs[sp303::KNOB_DRIVE].value;
+    }
+
+    sp303::audio_set_input_gain(audio, c->cached_input_gain);
     sp303::audio_set_output_gain(audio, state.knobs[sp303::KNOB_VOLUME].value);
 
     // Push effect routing and current knob values to audio engine
@@ -224,12 +263,53 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
         }
         sp303::audio_set_effect_routing(audio, active_btn, mfx_sub, pad_mask);
         sp303::audio_set_effect_params(audio,
-            state.knobs[sp303::KNOB_CUTOFF].value,
-            state.knobs[sp303::KNOB_RESONANCE].value,
-            state.knobs[sp303::KNOB_DRIVE].value);
+            c->cached_fx_p1,
+            c->cached_fx_p2,
+            c->cached_fx_p3);
     }
+    c->was_input_gain_mode = input_gain_mode;
 
-    sp303::audio_set_pattern_bpm(audio, 120);
+    sp303::audio_set_pattern_bpm(audio, sp303::get_pattern_bpm(dev));
+
+    if (sp303::is_pattern_record_select(dev) && !sp303::is_pattern_recording(dev)) {
+        if (!c->was_pattern_record_select) {
+            c->pattern_preview_beat_index = 0;
+            sp303::audio_trigger_metronome(audio, sp303::get_pattern_metronome_level(dev), true);
+        }
+        const double samples_per_quarter =
+            (60.0 * c->audio_cfg.sample_rate) / std::max(40, sp303::get_pattern_bpm(dev));
+        c->pattern_preview_quarter_progress += 735.0;
+        while (c->pattern_preview_quarter_progress >= samples_per_quarter) {
+            c->pattern_preview_quarter_progress -= samples_per_quarter;
+            c->pattern_preview_beat_index = (c->pattern_preview_beat_index + 1) % 4;
+            sp303::audio_trigger_metronome(audio,
+                                           sp303::get_pattern_metronome_level(dev),
+                                           c->pattern_preview_beat_index == 0);
+        }
+    } else {
+        c->pattern_preview_quarter_progress = 0.0;
+        c->pattern_preview_beat_index = 0;
+    }
+    c->was_pattern_record_select = sp303::is_pattern_record_select(dev) && !sp303::is_pattern_recording(dev);
+
+    for (;;) {
+        int slot = sp303::consume_pattern_trigger(dev);
+        if (slot < 0) break;
+        if (!sp303::pad_has_sample(dev, slot)) continue;
+        bool loop_mode = sp303::get_pad_loop_mode(dev, slot);
+        bool gate_mode = sp303::get_pad_gate_mode(dev, slot);
+        bool reverse_mode = sp303::get_pad_reverse_mode(dev, slot);
+        int hold_frames = sp303::audio_get_pad_led_hold_frames(audio, slot, reverse_mode);
+        sp303::set_pad_led_hold_frames(dev, slot, hold_frames);
+        sp303::note_pattern_pad_played(dev, slot);
+        sp303::audio_trigger_mode(audio, slot, loop_mode, gate_mode, reverse_mode);
+    }
+    for (;;) {
+        int metro = sp303::consume_pattern_metronome(dev);
+        if (metro <= 0) break;
+        int level = sp303::get_pattern_metronome_level(dev);
+        sp303::audio_trigger_metronome(audio, level, metro == 2);
+    }
 
     bool is_editing_sample = sp303::is_start_end_level_mode(dev);
     if (is_editing_sample && !c->was_editing_sample) {
@@ -328,6 +408,7 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
             sp303::set_time_bpm_display_number(dev, c->time_bpm_display_value);
         }
     } else if (!is_editing_sample &&
+               !sp303::is_pattern_mode(dev) &&
                !sp303::is_sampling_standby(dev) &&
                !sp303::is_sampling_ready(dev) &&
                !sp303::is_recording(dev) &&
@@ -343,7 +424,9 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
 
     int mark_pad = sp303::get_last_played_pad(dev);
     bool mark_lit = false;
-    if (mark_pad >= 0 && sp303::pad_has_sample(dev, mark_pad)) {
+    if (!sp303::is_pattern_mode(dev) &&
+        mark_pad >= 0 &&
+        sp303::pad_has_sample(dev, mark_pad)) {
         int start_value = sp303::audio_get_sample_start(audio, mark_pad);
         int end_value   = sp303::audio_get_sample_end(audio, mark_pad);
         mark_lit = (start_value > 0) || (end_value < 127);

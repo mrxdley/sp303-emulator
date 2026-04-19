@@ -24,8 +24,16 @@ struct RendererController {
     int sample_silence_frames = 0;
     bool was_editing_sample = false;
     bool was_time_bpm_mode = false;
+    bool was_input_gain_mode = false;
+    bool was_pattern_record_select = false;
+    int pattern_preview_beat_index = 0;
     int time_bpm_display_kind = 0; // 0=number, 1=off, 2=pattern
     int time_bpm_display_value = 120;
+    float cached_input_gain = 0.8f;
+    float cached_fx_p1 = 0.5f;
+    float cached_fx_p2 = 0.5f;
+    float cached_fx_p3 = 0.5f;
+    double pattern_preview_quarter_progress = 0.0;
 };
 
 bool renderer_controller_init(RendererController* c);

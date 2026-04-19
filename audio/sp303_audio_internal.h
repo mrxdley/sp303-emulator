@@ -86,6 +86,11 @@ struct Audio {
     std::atomic<float>    fx_p2{0.0f};          // RESONANCE knob value
     std::atomic<float>    fx_p3{0.5f};          // DRIVE    knob value
     std::atomic<int>      pattern_bpm{120};
+    std::atomic<int>      metronome_level{0};      // 0-127
+    std::atomic<int>      metronome_accent{0};     // 0 none, 1 weak, 2 strong
+    std::atomic<int>      metronome_frames_left{0};
+    uint32_t              metronome_noise_state = 0x12345678u;
+    float                 metronome_prev_noise = 0.0f;
 
     // ─── Bus effect state (playback callback only after init) ─────────────────
     // global_fx_state and fx_wet_buf are only ever touched by playback_cb after

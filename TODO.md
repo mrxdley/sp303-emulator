@@ -65,6 +65,31 @@ audio/effects/
 - `PITCH` is intentionally implemented as playback-speed change, not a hardware-faithful pitch-shift algorithm.
 - This means pitch and duration change together.
 - Keep this note in mind if we later replace it with a better shifter.
+- The pitch path still needs a hard review for early-stop behavior when samples are pitched down.
+- Current suspected issue:
+  - the pitch effect stretches playback in time by changing playback rate
+  - but the voice still stops against the sample's normal trimmed end condition
+  - this can make pitched-down playback feel truncated even though there is no separate "hard time cap"
+  - fix later by auditing the pitch playback cursor and stop condition together, not independently
+
+### Knob Ownership
+- Knob meaning should be explicit per state.
+- Do not let CTRL 3 / MFX meaning leak across unrelated modes.
+- Recording gain, sample level, effect params, and pattern edit controls should be state-local, not globally shared if the mode already defines them.
+
+### Pattern / Tap Tempo Notes
+- Pattern tap-tempo BPM is now displayed for 3 seconds after enough taps are collected.
+- Treat that value as debug-helpful, not hardware-accurate.
+- The tap BPM is derived from a short 4-tap average and may drift from the original unit's feel or rounding behavior.
+
+### Convenience Features
+- Consider a non-manual convenience mode for `START/END/LEVEL` sample `LEVEL`.
+- Manual-faithful behavior is `0..127` with `127 = original recorded level` and no boost above unity.
+- Convenience option to explore later:
+  - treat a middle value as neutral and allow gain boost above the original sample level
+  - keep this clearly marked as emulator-only behavior, not SP-303-authentic behavior
+- Consider emulator-only resampling of live pattern playback.
+- Keep this explicitly marked as a convenience feature unless the manual confirms an equivalent workflow.
 
 ## Truncate Workflow (From SP-303 Manual)
 
