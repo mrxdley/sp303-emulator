@@ -867,24 +867,32 @@ bool audio_recording_full(Audio* a) {
 
 bool audio_assign_recording(Audio* a, int slot) {
     if (!a || slot < 0 || slot >= AUDIO_SLOTS) return false;
-    std::lock_guard<std::mutex> lock(a->rec_mutex);
-
-    if (a->rec_frames == 0 || a->rec_buffer.empty()) return false;
-
     std::vector<float> recorded;
-    recorded.reserve(a->rec_frames * (a->rec_stereo ? 2 : 1));
+    uint32_t recorded_channels = 1;
+    {
+        std::lock_guard<std::mutex> lock(a->rec_mutex);
 
-    uint32_t start_frame = (a->rec_write_pos >= a->rec_frames)
-        ? (a->rec_write_pos - a->rec_frames)
-        : (a->rec_max_frames + a->rec_write_pos - a->rec_frames);
-    for (uint32_t i = 0; i < a->rec_frames; ++i) {
-        uint32_t frame = (start_frame + i) % a->rec_max_frames;
-        if (a->rec_stereo) {
-            recorded.push_back(a->rec_buffer[frame * 2]);
-            recorded.push_back(a->rec_buffer[frame * 2 + 1]);
-        } else {
-            recorded.push_back(a->rec_buffer[frame]);
+        if (a->rec_frames == 0 || a->rec_buffer.empty()) return false;
+
+        recorded_channels = a->rec_stereo ? 2u : 1u;
+        recorded.reserve(a->rec_frames * recorded_channels);
+
+        uint32_t start_frame = (a->rec_write_pos >= a->rec_frames)
+            ? (a->rec_write_pos - a->rec_frames)
+            : (a->rec_max_frames + a->rec_write_pos - a->rec_frames);
+        for (uint32_t i = 0; i < a->rec_frames; ++i) {
+            uint32_t frame = (start_frame + i) % a->rec_max_frames;
+            if (a->rec_stereo) {
+                recorded.push_back(a->rec_buffer[frame * 2]);
+                recorded.push_back(a->rec_buffer[frame * 2 + 1]);
+            } else {
+                recorded.push_back(a->rec_buffer[frame]);
+            }
         }
+
+        a->rec_frames = 0;
+        a->rec_write_pos = 0;
+        a->rec_full = false;
     }
 
     auto quantize = [](float x, int bits) -> float {
@@ -894,7 +902,7 @@ bool audio_assign_recording(Audio* a, int slot) {
         return (q * 2.0f) - 1.0f;
     };
     if (a->rec_quality == AUDIO_QUALITY_LONG || a->rec_quality == AUDIO_QUALITY_LOFI) {
-        int channels = a->rec_stereo ? 2 : 1;
+        int channels = (int)recorded_channels;
         float alpha = (a->rec_quality == AUDIO_QUALITY_LONG) ? 0.20f : 0.08f;
         int bits = (a->rec_quality == AUDIO_QUALITY_LONG) ? 12 : 8;
         std::vector<float> prev(channels, 0.0f);
@@ -919,15 +927,14 @@ bool audio_assign_recording(Audio* a, int slot) {
     {
         std::lock_guard<std::mutex> vlock(a->voice_mutex);
         a->samples[slot].pcm = std::move(recorded);
-        a->samples[slot].channels = a->rec_stereo ? 2u : 1u;
+        a->samples[slot].channels = recorded_channels;
         a->samples[slot].level = 1.0f;
         a->samples[slot].start_frame = 0;
         a->samples[slot].end_frame = (uint32_t)(a->samples[slot].pcm.size() / a->samples[slot].channels);
+        a->samples[slot].bpm_adjust = 0;
+        a->samples[slot].time_mode = 0;
+        a->samples[slot].time_target_bpm = -1;
     }
-
-    a->rec_frames = 0;
-    a->rec_write_pos = 0;
-    a->rec_full = false;
 
     return true;
 }
