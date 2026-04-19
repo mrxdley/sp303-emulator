@@ -625,7 +625,7 @@ int main(void) {
             ProjectIoResult res = project_save(QUICKSAVE_DIR, dev, controller.audio, controller.audio_cfg);
             std::printf("[PROJECT] %s\n", res.message.c_str());
         }
-        if (!config_open && IsKeyPressed(KEY_F9)) {
+            if (!config_open && IsKeyPressed(KEY_F9)) {
             release_live_inputs();
             drag.target = DRAG_NONE;
             sp303::Device* loaded_dev = sp303::create();
@@ -637,6 +637,11 @@ int main(void) {
                 sp303::destroy(loaded_dev);
             }
             std::printf("[PROJECT] %s\n", res.message.c_str());
+        }
+
+        if (!config_open && IsKeyPressed(KEY_Q)) {
+            sp303::button_down(dev, sp303::BTN_CANCEL);
+            sp303::button_up(dev, sp303::BTN_CANCEL);
         }
 
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && config_open) {
@@ -671,6 +676,7 @@ int main(void) {
                     bool resample_source = sp303::is_resample_source_select(dev);
                     bool resample_dest = sp303::is_resample_dest_select(dev);
                     bool resample_armed = sp303::is_resample_armed(dev);
+                    bool resample_recording = sp303::is_resample_recording(dev);
                     for (int i = 0; i < 8; ++i) {
                         if (hit_btn(mx, my, layout.buttons[sp303::BTN_PAD_1 + i])) {
                             int pad_id = sp303::BTN_PAD_1 + cur.active_bank * 8 + i;
@@ -681,7 +687,12 @@ int main(void) {
                                 sp303::note_pad_played(dev, slot);
                                 trigger_pad_audio(slot);
                             } else if (resample_armed) {
-                                if (slot == sp303::get_resample_source_pad(dev)) {
+                                if (sp303::pad_has_sample(dev, slot)) {
+                                    sp303::note_pad_played(dev, slot);
+                                    trigger_pad_audio(slot);
+                                }
+                            } else if (resample_recording) {
+                                if (sp303::pad_has_sample(dev, slot)) {
                                     sp303::note_pad_played(dev, slot);
                                     trigger_pad_audio(slot);
                                 }
@@ -773,6 +784,7 @@ int main(void) {
             bool resample_source = sp303::is_resample_source_select(dev);
             bool resample_dest = sp303::is_resample_dest_select(dev);
             bool resample_armed = sp303::is_resample_armed(dev);
+            bool resample_recording = sp303::is_resample_recording(dev);
             for (auto& [key, btn] : keymap) {
                 if (IsKeyPressed(key)) {
                     sp303::ButtonID actual = btn;
@@ -786,7 +798,12 @@ int main(void) {
                             sp303::note_pad_played(dev, slot);
                             trigger_pad_audio(slot);
                         } else if (resample_armed) {
-                            if (slot == sp303::get_resample_source_pad(dev)) {
+                            if (sp303::pad_has_sample(dev, slot)) {
+                                sp303::note_pad_played(dev, slot);
+                                trigger_pad_audio(slot);
+                            }
+                        } else if (resample_recording) {
+                            if (sp303::pad_has_sample(dev, slot)) {
                                 sp303::note_pad_played(dev, slot);
                                 trigger_pad_audio(slot);
                             }

@@ -871,11 +871,19 @@ void button_down(Device* dev, ButtonID btn) {
     }
 
     if (btn == BTN_STEREO) {
+        if (dev->sampling_state == SAMPLING_RESAMPLE_ARMED ||
+            dev->sampling_state == SAMPLING_RESAMPLE_RECORDING) {
+            return;
+        }
         dev->sampling_stereo = !dev->sampling_stereo;
         return;
     }
 
     if (btn == BTN_LONG_LOFI) {
+        if (dev->sampling_state == SAMPLING_RESAMPLE_ARMED ||
+            dev->sampling_state == SAMPLING_RESAMPLE_RECORDING) {
+            return;
+        }
         if (dev->sampling_quality == SAMPLE_QUALITY_STANDARD) {
             dev->sampling_quality = SAMPLE_QUALITY_LONG;
         } else if (dev->sampling_quality == SAMPLE_QUALITY_LONG) {
@@ -1147,7 +1155,8 @@ void tick(Device* dev, uint32_t samples_elapsed) {
         dev->state.buttons[BTN_RESAMPLE].lit = true;
         int bank_start = dev->state.active_bank * 8;
         for (int i = 0; i < 8; ++i) {
-            if (dev->pad_led_hold_frames[bank_start + i] > 0) {
+            if (dev->pad_led_hold_frames[bank_start + i] > 0 ||
+                dev->state.buttons[BTN_PAD_1 + i].pressed) {
                 dev->state.buttons[BTN_PAD_1 + i].lit = true;
             }
         }
