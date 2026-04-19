@@ -78,6 +78,12 @@ sp303/
 - RECORDING mode: Selected pad lit solid, REC button blinks
 - Playback: Monophonic per pad (retriggering cuts off previous play)
 
+### Effect Architecture Notes
+- `FILTER+DRIVE` is an insert effect processed per voice, per sample.
+- `DELAY` is a bus effect processed on a wet bus after voices are mixed.
+- `PITCH` is currently a deliberate simplification: it changes playback speed instead of using a hardware-faithful pitch algorithm.
+- Because of that, `PITCH` changes both pitch and duration. This is intentional for now and may be replaced later.
+
 ## Virtual Audio Setup (Linux/PipeWire)
 
 The project includes helper scripts for routing system audio (YouTube, etc.) into the sampler:

@@ -18,7 +18,7 @@ static const int N_BUFS = 5;
 static const char* AUDIO_CFG_FILE = "audio_config.json";
 
 struct AppConfig {
-    SP303AudioConfig audio{};
+    sp303::AudioConfig audio{};
     float peak_threshold = DEFAULT_PEAK_THRESHOLD;
 };
 
@@ -27,13 +27,28 @@ static float sample_level_threshold_to_peak(int level) {
     return std::clamp(level * 0.01f, 0.0f, 1.0f);
 }
 
-static SP303AudioQuality to_audio_quality(SP303SampleQuality q) {
+static sp303::AudioQuality to_audio_quality(sp303::SampleQuality q) {
     switch (q) {
-        case SP303_SAMPLE_QUALITY_LONG: return SP303_AUDIO_QUALITY_LONG;
-        case SP303_SAMPLE_QUALITY_LOFI: return SP303_AUDIO_QUALITY_LOFI;
-        case SP303_SAMPLE_QUALITY_STANDARD:
-        default: return SP303_AUDIO_QUALITY_STANDARD;
+        case sp303::SAMPLE_QUALITY_LONG: return sp303::AUDIO_QUALITY_LONG;
+        case sp303::SAMPLE_QUALITY_LOFI: return sp303::AUDIO_QUALITY_LOFI;
+        case sp303::SAMPLE_QUALITY_STANDARD:
+        default: return sp303::AUDIO_QUALITY_STANDARD;
     }
+}
+
+static float bpm_adjust_to_knob(int adjust) {
+    if (adjust < 0) return 0.0f;
+    if (adjust > 0) return 1.0f;
+    return 0.5f;
+}
+
+static float time_mode_to_knob(int mode, int target_bpm, int source_bpm) {
+    if (mode == 0) return 0.0f;
+    if (mode == 2) return 1.0f;
+    source_bpm = std::clamp(source_bpm, 40, 200);
+    target_bpm = std::clamp(target_bpm, 40, 200);
+    float ratio = target_bpm / (float)source_bpm;
+    return std::clamp((ratio - 0.5f) / 0.8f, 0.02f, 0.98f);
 }
 
 static bool virtual_input_exists() {
@@ -47,19 +62,19 @@ static bool virtual_input_exists() {
 
 static AppConfig load_app_config() {
     AppConfig cfg;
-    sp303_audio_config_default(&cfg.audio);
+    sp303::audio_config_default(&cfg.audio);
 
     if (virtual_input_exists()) {
-        std::strncpy(cfg.audio.input_name, "Monitor of SP303_Input", SP303_AUDIO_NAME_LEN - 1);
+        std::strncpy(cfg.audio.input_name, "Monitor of SP303_Input", sp303::AUDIO_NAME_LEN - 1);
     }
 
     std::ifstream f(AUDIO_CFG_FILE);
     if (!f.is_open()) return cfg;
     try {
         auto j = json::parse(f);
-        if (j.contains("output")) std::strncpy(cfg.audio.output_name, j["output"].get<std::string>().c_str(), SP303_AUDIO_NAME_LEN - 1);
+        if (j.contains("output")) std::strncpy(cfg.audio.output_name, j["output"].get<std::string>().c_str(), sp303::AUDIO_NAME_LEN - 1);
         if (j.contains("input") && !virtual_input_exists()) {
-            std::strncpy(cfg.audio.input_name, j["input"].get<std::string>().c_str(), SP303_AUDIO_NAME_LEN - 1);
+            std::strncpy(cfg.audio.input_name, j["input"].get<std::string>().c_str(), sp303::AUDIO_NAME_LEN - 1);
         }
         if (j.contains("rate"))   cfg.audio.sample_rate   = j["rate"];
         if (j.contains("buffer")) cfg.audio.buffer_frames = j["buffer"];
@@ -90,8 +105,8 @@ void renderer_controller_refresh_devices(RendererController* c) {
 
     c->out_devs.resize(64);
     c->in_devs.resize(64);
-    int n_out = sp303_audio_list_outputs(c->audio, c->out_devs.data(), 64);
-    int n_in  = sp303_audio_list_inputs(c->audio, c->in_devs.data(), 64);
+    int n_out = sp303::audio_list_outputs(c->audio, c->out_devs.data(), 64);
+    int n_in  = sp303::audio_list_inputs(c->audio, c->in_devs.data(), 64);
     c->out_devs.resize(n_out);
     c->in_devs.resize(n_in);
 }
@@ -101,18 +116,18 @@ bool renderer_controller_init(RendererController* c) {
     AppConfig cfg = load_app_config();
     c->audio_cfg = cfg.audio;
     c->peak_threshold = cfg.peak_threshold;
-    c->audio = sp303_audio_create(&c->audio_cfg);
+    c->audio = sp303::audio_create(&c->audio_cfg);
     c->playback_ok = (c->audio != nullptr);
     renderer_controller_refresh_devices(c);
 
     for (int i = 0; i < (int)c->out_devs.size(); ++i) {
-        if (std::strncmp(c->out_devs[i].name, c->audio_cfg.output_name, SP303_AUDIO_NAME_LEN) == 0) {
+        if (std::strncmp(c->out_devs[i].name, c->audio_cfg.output_name, sp303::AUDIO_NAME_LEN) == 0) {
             c->sel_out = i;
             break;
         }
     }
     for (int i = 0; i < (int)c->in_devs.size(); ++i) {
-        if (std::strncmp(c->in_devs[i].name, c->audio_cfg.input_name, SP303_AUDIO_NAME_LEN) == 0) {
+        if (std::strncmp(c->in_devs[i].name, c->audio_cfg.input_name, sp303::AUDIO_NAME_LEN) == 0) {
             c->sel_in = i;
             break;
         }
@@ -137,25 +152,25 @@ bool renderer_controller_init(RendererController* c) {
 
 void renderer_controller_shutdown(RendererController* c) {
     if (!c) return;
-    sp303_audio_destroy(c->audio);
+    sp303::audio_destroy(c->audio);
     c->audio = nullptr;
 }
 
 bool renderer_controller_apply_audio_config(RendererController* c) {
     if (!c) return false;
-    SP303AudioConfig new_cfg = c->audio_cfg;
+    sp303::AudioConfig new_cfg = c->audio_cfg;
     if (!c->out_devs.empty()) {
-        std::strncpy(new_cfg.output_name, c->out_devs[c->sel_out].name, SP303_AUDIO_NAME_LEN - 1);
+        std::strncpy(new_cfg.output_name, c->out_devs[c->sel_out].name, sp303::AUDIO_NAME_LEN - 1);
     }
     if (!c->in_devs.empty()) {
-        std::strncpy(new_cfg.input_name, c->in_devs[c->sel_in].name, SP303_AUDIO_NAME_LEN - 1);
+        std::strncpy(new_cfg.input_name, c->in_devs[c->sel_in].name, sp303::AUDIO_NAME_LEN - 1);
     }
     new_cfg.sample_rate   = SAMPLE_RATES[c->sel_rate];
     new_cfg.buffer_frames = BUFFER_SIZES[c->sel_buf];
 
     bool ok = true;
     if (c->audio) {
-        ok = sp303_audio_reconfigure(c->audio, &new_cfg);
+        ok = sp303::audio_reconfigure(c->audio, &new_cfg);
     }
     c->playback_ok = ok;
     if (ok) {
@@ -166,20 +181,20 @@ bool renderer_controller_apply_audio_config(RendererController* c) {
     return ok;
 }
 
-SP303State renderer_controller_step(RendererController* c, SP303Device* dev, int active_knob) {
-    sp303_tick(dev, 735);
-    SP303State state = sp303_get_state(dev);
+sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev, int active_knob) {
+    sp303::tick(dev, 735);
+    sp303::State state = sp303::get_state(dev);
 
     if (!c || !c->audio) return state;
 
-    SP303Audio* audio = c->audio;
-    sp303_audio_set_recording_mode(audio,
-                                   sp303_get_sampling_stereo(dev),
-                                   to_audio_quality(sp303_get_sampling_quality(dev)));
-    float input_peak = sp303_audio_input_peak(audio);
-    float output_peak = sp303_audio_peak(audio);
-    float stereo_diff_peak = sp303_audio_stereo_diff_peak(audio);
-    float global_peak = std::max(input_peak, output_peak);
+    sp303::Audio* audio = c->audio;
+    sp303::audio_set_recording_mode(audio,
+                                    sp303::get_sampling_stereo(dev),
+                                    to_audio_quality(sp303::get_sampling_quality(dev)));
+    float input_peak       = sp303::audio_input_peak(audio);
+    float output_peak      = sp303::audio_peak(audio);
+    float stereo_diff_peak = sp303::audio_stereo_diff_peak(audio);
+    float global_peak      = std::max(input_peak, output_peak);
     bool should_light_peak = global_peak > c->peak_threshold;
     c->stereo_activity_lit = (output_peak > 0.01f) && (stereo_diff_peak > 0.01f);
 
@@ -188,78 +203,162 @@ SP303State renderer_controller_step(RendererController* c, SP303Device* dev, int
     }
     if (c->peak_hold_frames > 0) {
         c->peak_hold_frames--;
-        sp303_indicator_set(dev, SP303_IND_PEAK, true);
+        sp303::indicator_set(dev, sp303::IND_PEAK, true);
     } else {
-        sp303_indicator_set(dev, SP303_IND_PEAK, false);
+        sp303::indicator_set(dev, sp303::IND_PEAK, false);
     }
     c->config_input_peak = input_peak;
 
-    float input_gain = state.knobs[SP303_KNOB_DRIVE].value;
-    sp303_audio_set_input_gain(audio, input_gain);
-    sp303_audio_set_output_gain(audio, state.knobs[SP303_KNOB_VOLUME].value);
+    float input_gain = state.knobs[sp303::KNOB_DRIVE].value;
+    sp303::audio_set_input_gain(audio, input_gain);
+    sp303::audio_set_output_gain(audio, state.knobs[sp303::KNOB_VOLUME].value);
 
-    bool is_editing_sample = sp303_is_start_end_level_mode(dev);
+    // Push effect routing and current knob values to audio engine
+    {
+        int      active_btn = sp303::get_active_effect_btn(dev);
+        int      mfx_sub    = sp303::get_mfx_type(dev);
+        uint32_t pad_mask   = 0;
+        for (int i = 0; i < 32; ++i) {
+            if (sp303::get_pad_has_effect(dev, i))
+                pad_mask |= (1u << i);
+        }
+        sp303::audio_set_effect_routing(audio, active_btn, mfx_sub, pad_mask);
+        sp303::audio_set_effect_params(audio,
+            state.knobs[sp303::KNOB_CUTOFF].value,
+            state.knobs[sp303::KNOB_RESONANCE].value,
+            state.knobs[sp303::KNOB_DRIVE].value);
+    }
+
+    sp303::audio_set_pattern_bpm(audio, 120);
+
+    bool is_editing_sample = sp303::is_start_end_level_mode(dev);
     if (is_editing_sample && !c->was_editing_sample) {
-        int last_played_pad = sp303_get_last_played_pad(dev);
+        int last_played_pad = sp303::get_last_played_pad(dev);
         if (last_played_pad >= 0) {
-            float start_knob = sp303_audio_get_sample_start(audio, last_played_pad) / 127.0f;
-            float end_knob = sp303_audio_get_sample_end(audio, last_played_pad) / 127.0f;
-            float level_knob = sp303_audio_get_sample_level(audio, last_played_pad) / 127.0f;
-            sp303_knob_set(dev, SP303_KNOB_CUTOFF, start_knob);
-            sp303_knob_set(dev, SP303_KNOB_RESONANCE, end_knob);
-            sp303_knob_set(dev, SP303_KNOB_DRIVE, level_knob);
-            state = sp303_get_state(dev);
+            float start_knob = sp303::audio_get_sample_start(audio, last_played_pad) / 127.0f;
+            float end_knob   = sp303::audio_get_sample_end(audio, last_played_pad) / 127.0f;
+            float level_knob = sp303::audio_get_sample_level(audio, last_played_pad) / 127.0f;
+            sp303::knob_set(dev, sp303::KNOB_CUTOFF, start_knob);
+            sp303::knob_set(dev, sp303::KNOB_RESONANCE, end_knob);
+            sp303::knob_set(dev, sp303::KNOB_DRIVE, level_knob);
+            state = sp303::get_state(dev);
         }
     }
     if (is_editing_sample) {
-        int last_played_pad = sp303_get_last_played_pad(dev);
+        int last_played_pad = sp303::get_last_played_pad(dev);
         if (last_played_pad >= 0) {
-            int start_value = std::clamp((int)std::lround(state.knobs[SP303_KNOB_CUTOFF].value * 127.0f), 0, 127);
-            int end_value = std::clamp((int)std::lround(state.knobs[SP303_KNOB_RESONANCE].value * 127.0f), 0, 127);
-            int sample_level = std::clamp((int)std::lround(state.knobs[SP303_KNOB_DRIVE].value * 127.0f), 0, 127);
-            sp303_audio_set_sample_start(audio, last_played_pad, start_value);
-            sp303_audio_set_sample_end(audio, last_played_pad, end_value);
-            sp303_audio_set_sample_level(audio, last_played_pad, sample_level);
+            int start_value  = std::clamp((int)std::lround(state.knobs[sp303::KNOB_CUTOFF].value * 127.0f), 0, 127);
+            int end_value    = std::clamp((int)std::lround(state.knobs[sp303::KNOB_RESONANCE].value * 127.0f), 0, 127);
+            int sample_level = std::clamp((int)std::lround(state.knobs[sp303::KNOB_DRIVE].value * 127.0f), 0, 127);
+            sp303::audio_set_sample_start(audio, last_played_pad, start_value);
+            sp303::audio_set_sample_end(audio, last_played_pad, end_value);
+            sp303::audio_set_sample_level(audio, last_played_pad, sample_level);
 
-            if (active_knob == SP303_KNOB_CUTOFF) {
-                sp303_set_edit_display_value(dev, start_value);
-            } else if (active_knob == SP303_KNOB_RESONANCE) {
-                sp303_set_edit_display_value(dev, end_value);
-            } else if (active_knob == SP303_KNOB_DRIVE) {
-                sp303_set_edit_display_value(dev, sample_level);
+            if (active_knob == sp303::KNOB_CUTOFF) {
+                sp303::set_edit_display_value(dev, start_value);
+            } else if (active_knob == sp303::KNOB_RESONANCE) {
+                sp303::set_edit_display_value(dev, end_value);
+            } else if (active_knob == sp303::KNOB_DRIVE) {
+                sp303::set_edit_display_value(dev, sample_level);
             }
         }
     }
     c->was_editing_sample = is_editing_sample;
 
-    int mark_pad = sp303_get_last_played_pad(dev);
+    bool is_time_bpm_mode = sp303::is_time_bpm_mode(dev);
+    int time_pad = sp303::get_time_bpm_pad(dev);
+    if (is_time_bpm_mode && !c->was_time_bpm_mode && time_pad >= 0 && sp303::pad_has_sample(dev, time_pad)) {
+        int sample_bpm = sp303::audio_get_sample_bpm(audio, time_pad);
+        int bpm_adjust = sp303::audio_get_sample_bpm_adjust(audio, time_pad);
+        int time_mode = sp303::audio_get_sample_time_mode(audio, time_pad);
+        int target_bpm = sp303::audio_get_sample_time_target_bpm(audio, time_pad);
+        sp303::knob_set(dev, sp303::KNOB_CUTOFF, time_mode_to_knob(time_mode, target_bpm, sample_bpm));
+        sp303::knob_set(dev, sp303::KNOB_RESONANCE, bpm_adjust_to_knob(bpm_adjust));
+        state = sp303::get_state(dev);
+        c->time_bpm_display_kind = (time_mode == 0) ? 0 : ((time_mode == 2) ? 2 : 0);
+        c->time_bpm_display_value = (time_mode == 1 && target_bpm >= 40 && target_bpm <= 200) ? target_bpm : sample_bpm;
+    }
+    if (is_time_bpm_mode && time_pad >= 0 && sp303::pad_has_sample(dev, time_pad)) {
+        if (active_knob == sp303::KNOB_RESONANCE) {
+            int bpm_adjust = 0;
+            if (state.knobs[sp303::KNOB_RESONANCE].value < 0.25f) bpm_adjust = -1;
+            else if (state.knobs[sp303::KNOB_RESONANCE].value > 0.75f) bpm_adjust = 1;
+            sp303::audio_set_sample_bpm_adjust(audio, time_pad, bpm_adjust);
+            c->time_bpm_display_kind = 0;
+            c->time_bpm_display_value = sp303::audio_get_sample_bpm(audio, time_pad);
+        } else if (active_knob == sp303::KNOB_CUTOFF) {
+            float knob = state.knobs[sp303::KNOB_CUTOFF].value;
+            int sample_bpm = sp303::audio_get_sample_bpm(audio, time_pad);
+            if (knob <= 0.01f) {
+                sp303::audio_set_sample_time_mode(audio, time_pad, 0, -1);
+                c->time_bpm_display_kind = 1;
+            } else if (knob >= 0.99f) {
+                sp303::audio_set_sample_time_mode(audio, time_pad, 2, 120);
+                c->time_bpm_display_kind = 2;
+            } else {
+                float ratio = 0.5f + (std::clamp(knob, 0.02f, 0.98f) * 0.8f);
+                int target_bpm = std::clamp((int)std::lround(sample_bpm * ratio), 40, 200);
+                sp303::audio_set_sample_time_mode(audio, time_pad, 1, target_bpm);
+                c->time_bpm_display_kind = 0;
+                c->time_bpm_display_value = target_bpm;
+            }
+        }
+
+        if (c->time_bpm_display_kind == 1) {
+            sp303::set_time_bpm_display_off(dev);
+        } else if (c->time_bpm_display_kind == 2) {
+            sp303::set_time_bpm_display_pattern(dev);
+        } else {
+            sp303::set_time_bpm_display_number(dev, c->time_bpm_display_value);
+        }
+    } else if (!is_editing_sample &&
+               !sp303::is_sampling_standby(dev) &&
+               !sp303::is_sampling_ready(dev) &&
+               !sp303::is_recording(dev) &&
+               !sp303::is_threshold_mode(dev) &&
+               !sp303::is_delete_mode(dev) &&
+               !sp303::is_resampling_mode(dev)) {
+        int last_played_pad = sp303::get_last_played_pad(dev);
+        if (last_played_pad >= 0 && sp303::pad_has_sample(dev, last_played_pad)) {
+            sp303::set_time_bpm_display_number(dev, sp303::audio_get_sample_bpm(audio, last_played_pad));
+        }
+    }
+    c->was_time_bpm_mode = is_time_bpm_mode;
+
+    int mark_pad = sp303::get_last_played_pad(dev);
     bool mark_lit = false;
-    if (mark_pad >= 0 && sp303_pad_has_sample(dev, mark_pad)) {
-        int start_value = sp303_audio_get_sample_start(audio, mark_pad);
-        int end_value = sp303_audio_get_sample_end(audio, mark_pad);
+    if (mark_pad >= 0 && sp303::pad_has_sample(dev, mark_pad)) {
+        int start_value = sp303::audio_get_sample_start(audio, mark_pad);
+        int end_value   = sp303::audio_get_sample_end(audio, mark_pad);
         mark_lit = (start_value > 0) || (end_value < 127);
     }
-    sp303_set_mark_lit(dev, mark_lit);
+    sp303::set_mark_lit(dev, mark_lit);
 
-    int sample_threshold_level = sp303_get_sample_level_threshold(dev);
+    int sample_threshold_level = sp303::get_sample_level_threshold(dev);
     float sample_threshold_peak = sample_level_threshold_to_peak(sample_threshold_level);
     bool threshold_crossed = input_peak >= sample_threshold_peak;
-    bool was_recording = sp303_audio_is_recording(audio);
-    bool is_ready = sp303_is_sampling_ready(dev);
-    bool should_record = sp303_is_recording(dev);
-    bool in_standby = sp303_is_sampling_standby(dev);
+    bool was_recording = sp303::audio_is_recording(audio);
+    bool is_ready      = sp303::is_sampling_ready(dev);
+    bool should_record = sp303::is_recording(dev);
+    bool in_standby    = sp303::is_sampling_standby(dev);
+    bool resample_mode = sp303::is_resampling_mode(dev);
+    bool resample_recording = sp303::is_resample_recording(dev);
 
-    if (is_ready) {
+    sp303::audio_set_record_from_output(audio, resample_recording);
+
+    if (resample_mode) {
+        c->sample_silence_frames = 0;
+    } else if (is_ready) {
         if (threshold_crossed) {
-            sp303_start_threshold_recording(dev);
-            should_record = sp303_is_recording(dev);
+            sp303::start_threshold_recording(dev);
+            should_record = sp303::is_recording(dev);
             c->sample_silence_frames = 0;
             std::printf("[SAMPLE] trigger crossed: peak=%.4f threshold=%d (%.4f)\n",
                         input_peak, sample_threshold_level, sample_threshold_peak);
         } else {
             c->sample_silence_frames = 0;
         }
-    } else if (should_record) {
+    } else if (should_record && !resample_recording) {
         if (threshold_crossed) {
             c->sample_silence_frames = 0;
         } else {
@@ -267,8 +366,8 @@ SP303State renderer_controller_step(RendererController* c, SP303Device* dev, int
             if (c->sample_silence_frames >= 8) {
                 std::printf("[SAMPLE] silence stop: peak=%.4f threshold=%d (%.4f)\n",
                             input_peak, sample_threshold_level, sample_threshold_peak);
-                sp303_finish_threshold_recording(dev);
-                should_record = sp303_is_recording(dev);
+                sp303::finish_threshold_recording(dev);
+                should_record = sp303::is_recording(dev);
                 c->sample_silence_frames = 0;
             }
         }
@@ -277,46 +376,57 @@ SP303State renderer_controller_step(RendererController* c, SP303Device* dev, int
     }
 
     if (should_record && !was_recording) {
-        sp303_audio_start_recording(audio);
+        sp303::audio_start_recording(audio);
     } else if (!should_record && was_recording) {
-        sp303_audio_stop_recording(audio);
-        int target_pad = sp303_get_last_sampling_target_pad(dev);
+        sp303::audio_stop_recording(audio);
+        int target_pad = sp303::get_last_sampling_target_pad(dev);
         if (target_pad >= 0) {
-            bool assigned = sp303_audio_assign_recording(audio, target_pad);
-            int bpm_quantize = sp303_consume_record_bpm_quantize(dev);
+            bool assigned = sp303::audio_assign_recording(audio, target_pad);
+            int bpm_quantize = sp303::consume_record_bpm_quantize(dev);
             if (assigned && bpm_quantize >= 40 && bpm_quantize <= 200) {
-                sp303_audio_quantize_sample_end_to_bpm(audio, target_pad, bpm_quantize);
+                sp303::audio_quantize_sample_end_to_bpm(audio, target_pad, bpm_quantize);
             }
         }
-    } else if (!should_record && !in_standby) {
-        sp303_audio_cancel_recording(audio);
+    } else if (!should_record && !in_standby && !resample_mode) {
+        sp303::audio_cancel_recording(audio);
     }
 
-    if (sp303_audio_recording_full(audio)) {
-        sp303_set_sampling_full(dev);
+    if (sp303::audio_recording_full(audio)) {
+        sp303::set_sampling_full(dev);
     }
 
-    int deleted_pad = sp303_consume_deleted_pad(dev);
+    int deleted_pad = sp303::consume_deleted_pad(dev);
     if (deleted_pad >= 0) {
-        sp303_audio_clear_sample(audio, deleted_pad);
+        sp303::audio_clear_sample(audio, deleted_pad);
     }
-    int truncate_pad = sp303_consume_truncate_pad(dev);
+    int truncate_pad = sp303::consume_truncate_pad(dev);
     if (truncate_pad >= 0) {
-        sp303_audio_truncate_sample(audio, truncate_pad);
+        sp303::audio_truncate_sample(audio, truncate_pad);
     }
-    int delete_all_group = sp303_consume_delete_all_group(dev);
+    int delete_all_group = sp303::consume_delete_all_group(dev);
     if (delete_all_group == 0 || delete_all_group == 1) {
         int start = (delete_all_group == 0) ? 0 : 16;
         int end = start + 16;
         for (int i = start; i < end; ++i) {
-            sp303_audio_clear_sample(audio, i);
+            sp303::audio_clear_sample(audio, i);
         }
     }
     int swap_a = -1;
     int swap_b = -1;
-    if (sp303_consume_swap_pads(dev, &swap_a, &swap_b)) {
-        sp303_audio_swap_samples(audio, swap_a, swap_b);
+    if (sp303::consume_swap_pads(dev, &swap_a, &swap_b)) {
+        sp303::audio_swap_samples(audio, swap_a, swap_b);
     }
 
-    return sp303_get_state(dev);
+    if (!sp303::is_start_end_level_mode(dev) &&
+        sp303::get_active_effect_btn(dev) == sp303::BTN_PITCH) {
+        if (active_knob == sp303::KNOB_CUTOFF) {
+            sp303::display_raw(dev, sp303::SEG_PIT[0], sp303::SEG_PIT[1], sp303::SEG_PIT[2]);
+        } else if (active_knob == sp303::KNOB_RESONANCE) {
+            sp303::display_raw(dev, sp303::SEG_FDB[0], sp303::SEG_FDB[1], sp303::SEG_FDB[2]);
+        } else if (active_knob == sp303::KNOB_DRIVE) {
+            sp303::display_raw(dev, sp303::SEG_DAL[0], sp303::SEG_DAL[1], sp303::SEG_DAL[2]);
+        }
+    }
+
+    return sp303::get_state(dev);
 }

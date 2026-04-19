@@ -3,36 +3,71 @@
 #include <algorithm>
 #include <cmath>
 
-static uint32_t min_gap_frames(const SP303Audio* a, uint32_t sample_size) {
+namespace sp303 {
+
+static uint32_t min_gap_frames(const Audio* a, uint32_t sample_size) {
     if (sample_size <= 1) return 1;
-    uint32_t gap = a->cfg.sample_rate / 10; // 100ms minimum gap
+    uint32_t gap = a->cfg.sample_rate / 10;
     return std::clamp(gap, 1u, sample_size - 1);
 }
 
-void sp303_audio_load_sample_impl(SP303Audio* a, int slot, const float* pcm, uint32_t frames) {
-    if (!a || slot < 0 || slot >= SP303_AUDIO_SLOTS) return;
+static int normalize_bpm(int bpm) {
+    if (bpm <= 0) return 120;
+    while (bpm < 40) bpm *= 2;
+    while (bpm > 200) bpm = (int)std::lround(bpm * 0.5f);
+    return std::clamp(bpm, 40, 200);
+}
+
+static int derive_base_bpm(const Audio* a, const Sample& s) {
+    const uint32_t size = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
+    if (size <= 1) return 120;
+    const uint32_t start = std::min(s.start_frame, size - 1);
+    const uint32_t end = std::clamp((s.end_frame == 0 ? size : s.end_frame), start + 1, size);
+    const uint32_t span = std::max(1u, end - start);
+    const float seconds = span / (float)a->cfg.sample_rate;
+    if (seconds <= 0.0f) return 120;
+    return normalize_bpm((int)std::lround(60.0f / seconds));
+}
+
+static int apply_bpm_adjust(int bpm, int adjust) {
+    if (adjust < 0) bpm = (int)std::lround(bpm * 0.5f);
+    else if (adjust > 0) bpm *= 2;
+    return normalize_bpm(bpm);
+}
+
+void audio_load_sample_impl(Audio* a, int slot, const float* pcm, uint32_t frames) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return;
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     a->samples[slot].pcm.assign(pcm, pcm + frames);
     a->samples[slot].channels = 1;
     a->samples[slot].start_frame = 0;
     a->samples[slot].end_frame = frames;
     a->samples[slot].level = 1.0f;
+    a->samples[slot].bpm_adjust = 0;
+    a->samples[slot].time_mode = 0;
+    a->samples[slot].time_target_bpm = -1;
 }
 
-void sp303_audio_clear_sample_impl(SP303Audio* a, int slot) {
-    if (!a || slot < 0 || slot >= SP303_AUDIO_SLOTS) return;
+void audio_clear_sample_impl(Audio* a, int slot) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return;
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     a->samples[slot].pcm.clear();
     a->samples[slot].channels = 1;
     a->samples[slot].level = 1.0f;
     a->samples[slot].start_frame = 0;
     a->samples[slot].end_frame = 0;
+    a->samples[slot].bpm_adjust = 0;
+    a->samples[slot].time_mode = 0;
+    a->samples[slot].time_target_bpm = -1;
+    for (auto& v : a->voices) {
+        if (v.active && v.slot == slot) v.active = false;
+    }
 }
 
-void sp303_audio_swap_samples_impl(SP303Audio* a, int slot_a, int slot_b) {
+void audio_swap_samples_impl(Audio* a, int slot_a, int slot_b) {
     if (!a) return;
-    if (slot_a < 0 || slot_a >= SP303_AUDIO_SLOTS) return;
-    if (slot_b < 0 || slot_b >= SP303_AUDIO_SLOTS) return;
+    if (slot_a < 0 || slot_a >= AUDIO_SLOTS) return;
+    if (slot_b < 0 || slot_b >= AUDIO_SLOTS) return;
     if (slot_a == slot_b) return;
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     std::swap(a->samples[slot_a], a->samples[slot_b]);
@@ -43,8 +78,8 @@ void sp303_audio_swap_samples_impl(SP303Audio* a, int slot_a, int slot_b) {
     }
 }
 
-void sp303_audio_set_sample_start_impl(SP303Audio* a, int slot, int value) {
-    if (!a || slot < 0 || slot >= SP303_AUDIO_SLOTS) return;
+void audio_set_sample_start_impl(Audio* a, int slot, int value) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return;
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     auto& s = a->samples[slot];
     uint32_t size = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
@@ -56,8 +91,8 @@ void sp303_audio_set_sample_start_impl(SP303Audio* a, int slot, int value) {
     s.start_frame = std::min(target, max_start);
 }
 
-void sp303_audio_set_sample_end_impl(SP303Audio* a, int slot, int value) {
-    if (!a || slot < 0 || slot >= SP303_AUDIO_SLOTS) return;
+void audio_set_sample_end_impl(Audio* a, int slot, int value) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return;
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     auto& s = a->samples[slot];
     uint32_t size = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
@@ -69,8 +104,8 @@ void sp303_audio_set_sample_end_impl(SP303Audio* a, int slot, int value) {
     s.end_frame = std::max(target, min_end);
 }
 
-int sp303_audio_get_sample_start_impl(SP303Audio* a, int slot) {
-    if (!a || slot < 0 || slot >= SP303_AUDIO_SLOTS) return 0;
+int audio_get_sample_start_impl(Audio* a, int slot) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return 0;
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     const auto& s = a->samples[slot];
     uint32_t size = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
@@ -78,8 +113,8 @@ int sp303_audio_get_sample_start_impl(SP303Audio* a, int slot) {
     return std::clamp((int)std::lround((s.start_frame / (float)(size - 1)) * 127.0f), 0, 127);
 }
 
-int sp303_audio_get_sample_end_impl(SP303Audio* a, int slot) {
-    if (!a || slot < 0 || slot >= SP303_AUDIO_SLOTS) return 127;
+int audio_get_sample_end_impl(Audio* a, int slot) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return 127;
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     const auto& s = a->samples[slot];
     uint32_t size = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
@@ -88,8 +123,8 @@ int sp303_audio_get_sample_end_impl(SP303Audio* a, int slot) {
     return std::clamp((int)std::lround((end / (float)size) * 127.0f), 0, 127);
 }
 
-bool sp303_audio_truncate_sample_impl(SP303Audio* a, int slot) {
-    if (!a || slot < 0 || slot >= SP303_AUDIO_SLOTS) return false;
+bool audio_truncate_sample_impl(Audio* a, int slot) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return false;
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     auto& s = a->samples[slot];
     uint32_t size = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
@@ -119,8 +154,8 @@ bool sp303_audio_truncate_sample_impl(SP303Audio* a, int slot) {
     return true;
 }
 
-bool sp303_audio_quantize_sample_end_to_bpm_impl(SP303Audio* a, int slot, int bpm) {
-    if (!a || slot < 0 || slot >= SP303_AUDIO_SLOTS) return false;
+bool audio_quantize_sample_end_to_bpm_impl(Audio* a, int slot, int bpm) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return false;
     bpm = std::clamp(bpm, 40, 200);
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     auto& s = a->samples[slot];
@@ -145,14 +180,56 @@ bool sp303_audio_quantize_sample_end_to_bpm_impl(SP303Audio* a, int slot, int bp
     return true;
 }
 
-void sp303_audio_set_sample_level_impl(SP303Audio* a, int slot, int level) {
-    if (!a || slot < 0 || slot >= SP303_AUDIO_SLOTS) return;
+void audio_set_sample_level_impl(Audio* a, int slot, int level) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return;
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     a->samples[slot].level = std::clamp(level / 127.0f, 0.0f, 1.0f);
 }
 
-int sp303_audio_get_sample_level_impl(SP303Audio* a, int slot) {
-    if (!a || slot < 0 || slot >= SP303_AUDIO_SLOTS) return 127;
+int audio_get_sample_level_impl(Audio* a, int slot) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return 127;
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     return std::clamp((int)std::lround(a->samples[slot].level * 127.0f), 0, 127);
 }
+
+int audio_get_sample_bpm_impl(Audio* a, int slot) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return 120;
+    std::lock_guard<std::mutex> lock(a->voice_mutex);
+    const auto& s = a->samples[slot];
+    if (s.pcm.empty()) return 120;
+    return apply_bpm_adjust(derive_base_bpm(a, s), s.bpm_adjust);
+}
+
+void audio_set_sample_bpm_adjust_impl(Audio* a, int slot, int adjust) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return;
+    std::lock_guard<std::mutex> lock(a->voice_mutex);
+    a->samples[slot].bpm_adjust = std::clamp(adjust, -1, 1);
+}
+
+int audio_get_sample_bpm_adjust_impl(Audio* a, int slot) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return 0;
+    std::lock_guard<std::mutex> lock(a->voice_mutex);
+    return std::clamp(a->samples[slot].bpm_adjust, -1, 1);
+}
+
+void audio_set_sample_time_mode_impl(Audio* a, int slot, int mode, int target_bpm) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return;
+    std::lock_guard<std::mutex> lock(a->voice_mutex);
+    auto& s = a->samples[slot];
+    s.time_mode = std::clamp(mode, 0, 2);
+    s.time_target_bpm = (s.time_mode == 1) ? std::clamp(target_bpm, 40, 200) : -1;
+}
+
+int audio_get_sample_time_mode_impl(Audio* a, int slot) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return 0;
+    std::lock_guard<std::mutex> lock(a->voice_mutex);
+    return std::clamp(a->samples[slot].time_mode, 0, 2);
+}
+
+int audio_get_sample_time_target_bpm_impl(Audio* a, int slot) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return -1;
+    std::lock_guard<std::mutex> lock(a->voice_mutex);
+    return a->samples[slot].time_target_bpm;
+}
+
+} // namespace sp303

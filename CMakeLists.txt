@@ -61,8 +61,12 @@ target_include_directories(miniaudio_iface INTERFACE ${miniaudio_SOURCE_DIR})
 
 add_library(sp303_audio
     audio/sp303_audio.cpp
-    audio/sample_ops.cpp)
-target_include_directories(sp303_audio PUBLIC audio)
+    audio/sample_ops.cpp
+    audio/effect.cpp
+    audio/effects/filter_drive.cpp
+    audio/effects/pitch.cpp
+    audio/effects/delay.cpp)
+target_include_directories(sp303_audio PUBLIC audio PRIVATE core)
 target_link_libraries(sp303_audio PRIVATE miniaudio_iface)
 
 if(UNIX AND NOT APPLE AND NOT ANDROID)
@@ -79,7 +83,8 @@ endif()
 
 add_executable(sp303_renderer
     renderer/main.cpp
-    renderer/controller.cpp)
+    renderer/controller.cpp
+    renderer/project_io.cpp)
 target_link_libraries(sp303_renderer PRIVATE
     sp303 sp303_audio raylib nlohmann_json::nlohmann_json)
 target_include_directories(sp303_renderer PRIVATE renderer)
