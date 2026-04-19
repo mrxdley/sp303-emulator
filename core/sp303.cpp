@@ -227,6 +227,8 @@ typedef enum {
     SAMPLING_DELETE_ALL_ARMED,
     SAMPLING_SWAP_SELECT_A,
     SAMPLING_SWAP_SELECT_B,
+    SAMPLING_MARK_EDIT,
+    SAMPLING_MARK_END_ONLY,
     SAMPLING_RESAMPLE_SOURCE,
     SAMPLING_RESAMPLE_DEST,
     SAMPLING_RESAMPLE_ARMED,
@@ -257,6 +259,9 @@ struct Device {
     int swap_pad_b;
     int swap_pending_a;
     int swap_pending_b;
+    int mark_edit_pad;
+    int mark_pending_action; // 0 none, 1 set start, 2 set end
+    int mark_action_pad;
     bool sampling_stereo;
     SampleQuality sampling_quality;
     bool bpm_edit_mode;
@@ -324,6 +329,9 @@ Device* create() {
     dev->swap_pad_b = -1;
     dev->swap_pending_a = -1;
     dev->swap_pending_b = -1;
+    dev->mark_edit_pad = -1;
+    dev->mark_pending_action = 0;
+    dev->mark_action_pad = -1;
     dev->sampling_stereo = false;
     dev->sampling_quality = SAMPLE_QUALITY_STANDARD;
     dev->bpm_edit_mode = false;
@@ -434,6 +442,39 @@ void button_down(Device* dev, ButtonID btn) {
         dev->time_bpm_mode = false;
         dev->time_bpm_pad = -1;
         display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);
+    }
+
+    if (dev->sampling_state == SAMPLING_MARK_EDIT ||
+        dev->sampling_state == SAMPLING_MARK_END_ONLY) {
+        int mark_pad_btn = (dev->mark_edit_pad >= 0) ? (BTN_PAD_1 + dev->mark_edit_pad) : -1;
+        if (btn == BTN_CANCEL) {
+            dev->sampling_state = SAMPLING_IDLE;
+            dev->mark_edit_pad = -1;
+            display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);
+            return;
+        }
+        if (dev->sampling_state == SAMPLING_MARK_EDIT) {
+            if (btn == BTN_MARK) {
+                dev->mark_pending_action = 2;
+                dev->mark_action_pad = dev->mark_edit_pad;
+                dev->sampling_state = SAMPLING_IDLE;
+                dev->mark_edit_pad = -1;
+                return;
+            }
+            if (btn == mark_pad_btn) {
+                dev->sampling_state = SAMPLING_IDLE;
+                dev->mark_edit_pad = -1;
+                return;
+            }
+        } else {
+            if (btn == BTN_MARK) {
+                dev->mark_pending_action = 2;
+                dev->mark_action_pad = dev->mark_edit_pad;
+                dev->sampling_state = SAMPLING_IDLE;
+                dev->mark_edit_pad = -1;
+                return;
+            }
+        }
     }
 
     if (dev->sampling_state == SAMPLING_DELETE_SELECT) {
@@ -660,6 +701,19 @@ void button_down(Device* dev, ButtonID btn) {
         return;
     }
 
+    if (btn == BTN_MARK) {
+        if (dev->sampling_state == SAMPLING_IDLE &&
+            dev->last_played_pad >= 0 &&
+            dev->last_played_pad < 32 &&
+            dev->pad_has_sample[dev->last_played_pad]) {
+            dev->sampling_state = SAMPLING_MARK_EDIT;
+            dev->mark_edit_pad = dev->last_played_pad;
+            dev->mark_pending_action = 1;
+            dev->mark_action_pad = dev->mark_edit_pad;
+        }
+        return;
+    }
+
     if (btn == BTN_TAP_TEMPO &&
         dev->sampling_state == SAMPLING_STANDBY &&
         dev->bpm_edit_mode) {
@@ -864,11 +918,30 @@ void button_down(Device* dev, ButtonID btn) {
             return;
         }
     }
+
+    if (dev->sampling_state == SAMPLING_IDLE &&
+        dev->state.buttons[BTN_MARK].pressed &&
+        btn >= BTN_PAD_1 && btn <= BTN_PAD_8) {
+        int actual_pad = dev->state.active_bank * 8 + (btn - BTN_PAD_1);
+        if (dev->pad_has_sample[actual_pad]) {
+            dev->mark_edit_pad = actual_pad;
+            dev->last_played_pad = actual_pad;
+            dev->sampling_state = SAMPLING_MARK_END_ONLY;
+            return;
+        }
+    }
 }
 
 void button_up(Device* dev, ButtonID btn) {
     if (!dev || btn < 0 || btn >= BTN_COUNT) return;
     dev->state.buttons[btn].pressed = false;
+
+    if (dev->sampling_state == SAMPLING_MARK_EDIT &&
+        dev->mark_edit_pad >= 0 &&
+        btn == (BTN_PAD_1 + dev->mark_edit_pad)) {
+        dev->sampling_state = SAMPLING_IDLE;
+        dev->mark_edit_pad = -1;
+    }
 }
 
 void knob_set(Device* dev, KnobID knob, float value) {
@@ -1199,6 +1272,11 @@ void tick(Device* dev, uint32_t samples_elapsed) {
         }
         display_raw(dev, SEG_DAL[0], SEG_DAL[1], SEG_DAL[2]);
     }
+    else if (dev->sampling_state == SAMPLING_MARK_EDIT ||
+             dev->sampling_state == SAMPLING_MARK_END_ONLY) {
+        dev->state.buttons[BTN_MARK].lit = dev->blink_on;
+        display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);
+    }
 
     if (dev->last_played_pad >= 0 && dev->last_played_pad < 32 &&
         dev->pad_has_sample[dev->last_played_pad]) {
@@ -1356,6 +1434,18 @@ int consume_record_bpm_quantize(Device* dev) {
     int bpm = dev->pending_record_bpm_quantize;
     dev->pending_record_bpm_quantize = -1;
     return bpm;
+}
+
+int consume_mark_action(Device* dev) {
+    if (!dev) return 0;
+    int action = dev->mark_pending_action;
+    dev->mark_pending_action = 0;
+    return action;
+}
+
+int get_mark_edit_pad(const Device* dev) {
+    if (!dev) return -1;
+    return (dev->mark_pending_action != 0) ? dev->mark_action_pad : dev->mark_edit_pad;
 }
 
 bool get_pad_loop_mode(const Device* dev, int pad_index) {
@@ -1543,6 +1633,8 @@ void set_pad_project_state(Device* dev, int pad_index, const PadProjectState& st
 
 void reset_project_state(Device* dev) {
     if (!dev) return;
+    std::memset(dev->state.buttons, 0, sizeof(dev->state.buttons));
+    std::memset(dev->state.indicators, 0, sizeof(dev->state.indicators));
     for (int i = 0; i < 32; ++i) {
         pad_clear_sample(dev, i);
         dev->pad_led_hold_frames[i] = 0;
@@ -1562,6 +1654,9 @@ void reset_project_state(Device* dev) {
     dev->swap_pad_b = -1;
     dev->swap_pending_a = -1;
     dev->swap_pending_b = -1;
+    dev->mark_edit_pad = -1;
+    dev->mark_pending_action = 0;
+    dev->mark_action_pad = -1;
     dev->bpm_edit_mode = false;
     dev->bpm_value = -1;
     dev->bpm_armed_for_next_sample = false;
@@ -1573,6 +1668,7 @@ void reset_project_state(Device* dev) {
     dev->rec_gain_value = 0;
     dev->active_effect_btn = -1;
     dev->state.active_bank = 0;
+    dev->state.buttons[BTN_BANK_A].lit = true;
     display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);
 }
 

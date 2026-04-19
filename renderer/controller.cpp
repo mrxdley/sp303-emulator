@@ -265,6 +265,17 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     }
     c->was_editing_sample = is_editing_sample;
 
+    int mark_pad_action = sp303::get_mark_edit_pad(dev);
+    int mark_action = sp303::consume_mark_action(dev);
+    if (mark_action != 0 && mark_pad_action >= 0 && sp303::pad_has_sample(dev, mark_pad_action)) {
+        int playhead = sp303::audio_get_sample_playhead(audio, mark_pad_action);
+        if (mark_action == 1) {
+            sp303::audio_set_sample_start(audio, mark_pad_action, playhead);
+        } else if (mark_action == 2) {
+            sp303::audio_set_sample_end(audio, mark_pad_action, playhead);
+        }
+    }
+
     bool is_time_bpm_mode = sp303::is_time_bpm_mode(dev);
     int time_pad = sp303::get_time_bpm_pad(dev);
     if (is_time_bpm_mode && !c->was_time_bpm_mode && time_pad >= 0 && sp303::pad_has_sample(dev, time_pad)) {

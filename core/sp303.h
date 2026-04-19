@@ -284,6 +284,8 @@ int  get_sample_level_threshold  (const Device* dev);  // 0-8
 int  get_last_played_pad         (const Device* dev);  // -1 if none
 int  get_time_bpm_pad            (const Device* dev);  // -1 if none
 int  consume_record_bpm_quantize (Device* dev);        // -1 if none, else 40-200
+int  consume_mark_action         (Device* dev);        // 0 none, 1 start, 2 end
+int  get_mark_edit_pad           (const Device* dev);  // -1 if none
 bool get_pad_loop_mode           (const Device* dev, int pad_index); // false=one-shot
 bool get_pad_gate_mode           (const Device* dev, int pad_index); // false=trigger
 bool get_pad_reverse_mode        (const Device* dev, int pad_index); // false=forward

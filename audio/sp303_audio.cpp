@@ -608,6 +608,30 @@ int audio_get_pattern_bpm(Audio* a) {
     return std::clamp(a->pattern_bpm.load(std::memory_order_relaxed), 40, 200);
 }
 
+int audio_get_sample_playhead(Audio* a, int slot) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return 0;
+    std::lock_guard<std::mutex> lock(a->voice_mutex);
+    const auto& s = a->samples[slot];
+    const uint32_t sample_size = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
+    if (sample_size <= 1) return 0;
+
+    for (const auto& v : a->voices) {
+        if (!v.active || v.slot != slot) continue;
+        uint32_t abs_frame = 0;
+        if (v.use_rendered && v.rendered_frames > 1) {
+            float norm = std::clamp(v.position / (float)(v.rendered_frames - 1), 0.0f, 1.0f);
+            uint32_t start = std::min(s.start_frame, sample_size - 1);
+            uint32_t end = std::clamp((s.end_frame == 0 ? sample_size : s.end_frame), start + 1, sample_size);
+            abs_frame = start + (uint32_t)std::lround(norm * (float)(end - start - 1));
+        } else {
+            abs_frame = std::min(v.position, sample_size - 1);
+        }
+        return std::clamp((int)std::lround((abs_frame / (float)(sample_size - 1)) * 127.0f), 0, 127);
+    }
+
+    return audio_get_sample_start(a, slot);
+}
+
 // ─── Playback ─────────────────────────────────────────────────────────────────
 
 bool audio_is_playing(Audio* a, int slot) {
