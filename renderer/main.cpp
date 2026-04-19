@@ -615,6 +615,8 @@ int main(void) {
             bool loop_mode = sp303::get_pad_loop_mode(dev, slot);
             bool gate_mode = sp303::get_pad_gate_mode(dev, slot);
             bool reverse_mode = sp303::get_pad_reverse_mode(dev, slot);
+            int hold_frames = sp303::audio_get_pad_led_hold_frames(controller.audio, slot, reverse_mode);
+            sp303::set_pad_led_hold_frames(dev, slot, hold_frames);
             sp303::audio_trigger_mode(controller.audio, slot, loop_mode, gate_mode, reverse_mode);
         };
 

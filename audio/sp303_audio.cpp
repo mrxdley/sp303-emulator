@@ -90,6 +90,53 @@ static void render_time_stretch(const Sample& s,
     *out_frames = out_len;
 }
 
+static int normalize_bpm_local(int bpm) {
+    if (bpm <= 0) return 120;
+    while (bpm < 40) bpm *= 2;
+    while (bpm > 200) bpm = (int)std::lround(bpm * 0.5f);
+    return std::clamp(bpm, 40, 200);
+}
+
+static int derive_sample_bpm_unlocked(const Audio* a, const Sample& s) {
+    const uint32_t size = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
+    if (size <= 1) return 120;
+    const uint32_t start = std::min(s.start_frame, size - 1);
+    const uint32_t end = std::clamp((s.end_frame == 0 ? size : s.end_frame), start + 1, size);
+    const uint32_t span = std::max(1u, end - start);
+    const float seconds = span / (float)a->cfg.sample_rate;
+    if (seconds <= 0.0f) return 120;
+    int bpm = (int)std::lround(60.0f / seconds);
+    if (s.bpm_adjust < 0) bpm = (int)std::lround(bpm * 0.5f);
+    else if (s.bpm_adjust > 0) bpm *= 2;
+    return normalize_bpm_local(bpm);
+}
+
+static uint32_t sample_span_frames_unlocked(const Sample& s) {
+    const uint32_t size = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
+    if (size <= 1) return 0;
+    const uint32_t start = std::min(s.start_frame, size - 1);
+    const uint32_t end = std::clamp((s.end_frame == 0 ? size : s.end_frame), start + 1, size);
+    return end - start;
+}
+
+static uint32_t effective_playback_frames_unlocked(const Audio* a, const Sample& s, bool reverse) {
+    if (reverse) return sample_span_frames_unlocked(s);
+    const uint32_t span = sample_span_frames_unlocked(s);
+    if (span == 0) return 0;
+    const int sample_bpm = derive_sample_bpm_unlocked(a, s);
+    const int pattern_bpm = audio_get_pattern_bpm(const_cast<Audio*>(a));
+    const int time_mode = std::clamp(s.time_mode, 0, 2);
+    const int target_bpm = (time_mode == 1) ? std::clamp(s.time_target_bpm, 40, 200)
+                         : (time_mode == 2) ? pattern_bpm
+                         : sample_bpm;
+    const bool use_time_modify = time_mode != 0 &&
+                                 sample_bpm >= 40 && sample_bpm <= 200 &&
+                                 target_bpm >= 40 && target_bpm <= 200;
+    if (!use_time_modify) return span;
+    const float stretch_ratio = std::clamp(sample_bpm / (float)target_bpm, 0.5f, 2.0f);
+    return std::max(1u, (uint32_t)std::lround(span * stretch_ratio));
+}
+
 static uint32_t record_interleaved_stereo_to_buffer(Audio* a, const float* in, ma_uint32 frames, float gain) {
     if (!a || !in) return 0;
     uint32_t frames_written = 0;
@@ -622,14 +669,25 @@ int audio_get_sample_playhead(Audio* a, int slot) {
             float norm = std::clamp(v.position / (float)(v.rendered_frames - 1), 0.0f, 1.0f);
             uint32_t start = std::min(s.start_frame, sample_size - 1);
             uint32_t end = std::clamp((s.end_frame == 0 ? sample_size : s.end_frame), start + 1, sample_size);
-            abs_frame = start + (uint32_t)std::lround(norm * (float)(end - start - 1));
+            uint32_t span = (end > start) ? (end - start) : 1u;
+            abs_frame = start + (uint32_t)std::lround(norm * (float)(span - 1));
         } else {
             abs_frame = std::min(v.position, sample_size - 1);
         }
         return std::clamp((int)std::lround((abs_frame / (float)(sample_size - 1)) * 127.0f), 0, 127);
     }
 
-    return audio_get_sample_start(a, slot);
+    return std::clamp((int)std::lround((s.start_frame / (float)(sample_size - 1)) * 127.0f), 0, 127);
+}
+
+int audio_get_pad_led_hold_frames(Audio* a, int slot, bool reverse) {
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return 180;
+    std::lock_guard<std::mutex> lock(a->voice_mutex);
+    const auto& s = a->samples[slot];
+    if (s.pcm.empty()) return 180;
+    const uint32_t playback_frames = effective_playback_frames_unlocked(a, s, reverse);
+    const float seconds = playback_frames / (float)std::max(1u, a->cfg.sample_rate);
+    return std::max(180, (int)std::lround(seconds * 60.0f) + 180);
 }
 
 // ─── Playback ─────────────────────────────────────────────────────────────────
@@ -659,7 +717,7 @@ void audio_trigger_mode(Audio* a, int slot, bool loop, bool gate, bool reverse) 
     const uint32_t sample_size = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
     const uint32_t start = std::min(s.start_frame, sample_size - 1);
     const uint32_t end = std::clamp((s.end_frame == 0 ? sample_size : s.end_frame), start + 1, sample_size);
-    const int sample_bpm = audio_get_sample_bpm_impl(a, slot);
+    const int sample_bpm = derive_sample_bpm_unlocked(a, s);
     const int time_mode = std::clamp(s.time_mode, 0, 2);
     const int pattern_bpm = audio_get_pattern_bpm(a);
     const int target_bpm = (time_mode == 1) ? std::clamp(s.time_target_bpm, 40, 200)
@@ -713,6 +771,18 @@ void audio_trigger_mode(Audio* a, int slot, bool loop, bool gate, bool reverse) 
             v.looping = loop;
             v.reverse = reverse;
             v.gain = 1.0f;
+
+            // Refresh effect routing on every retrigger so toggling a pad's
+            // effect assignment takes effect immediately on the next pad hit.
+            {
+                int   btn      = a->fx_active_btn.load(std::memory_order_relaxed);
+                int   mfx_sub  = a->fx_mfx_type.load(std::memory_order_relaxed);
+                uint32_t mask  = a->fx_pad_mask.load(std::memory_order_relaxed);
+                bool  has_fx   = (btn >= 0) && ((mask >> slot) & 1u);
+                v.fx_enabled = has_fx;
+                v.fx_def_idx = has_fx ? fx_btn_to_index(btn, mfx_sub) : -1;
+                v.fx_state   = {};
+            }
             std::printf("[PAD] Played bank %c pad %d (slot %d, retrigger)\n",
                         bank_name, pad, slot);
             return;

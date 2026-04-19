@@ -32,7 +32,7 @@ static int derive_base_bpm(const Audio* a, const Sample& s) {
 static int apply_bpm_adjust(int bpm, int adjust) {
     if (adjust < 0) bpm = (int)std::lround(bpm * 0.5f);
     else if (adjust > 0) bpm *= 2;
-    return normalize_bpm(bpm);
+    return std::clamp(bpm, 1, 999);
 }
 
 void audio_load_sample_impl(Audio* a, int slot, const float* pcm, uint32_t frames) {

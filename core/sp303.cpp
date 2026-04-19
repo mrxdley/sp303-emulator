@@ -211,6 +211,20 @@ const uint8_t SEG_PTN[3] = {
     SEG_C | SEG_E | SEG_G                            // n approximation
 };
 
+// "CoT": C, o, T
+const uint8_t SEG_COT[3] = {
+    SEG_A | SEG_D | SEG_E | SEG_F,                   // C
+    SEG_C | SEG_D | SEG_E | SEG_G,                   // o
+    SEG_D | SEG_E | SEG_F | SEG_G                    // T/t approximation
+};
+
+// "dRV": d, R, V
+const uint8_t SEG_DRV[3] = {
+    SEG_B | SEG_C | SEG_D | SEG_E | SEG_G,           // d
+    SEG_E | SEG_G,                                   // R/r approximation
+    SEG_C | SEG_D | SEG_E                            // V approximation
+};
+
 // ─── Sampling state machine ───────────────────────────────────────────────────
 
 typedef enum {
@@ -260,7 +274,7 @@ struct Device {
     int swap_pending_a;
     int swap_pending_b;
     int mark_edit_pad;
-    int mark_pending_action; // 0 none, 1 set start, 2 set end
+    int mark_pending_action; // 0 none, 1 set start, 2 set end, 3 reset full
     int mark_action_pad;
     bool sampling_stereo;
     SampleQuality sampling_quality;
@@ -706,6 +720,12 @@ void button_down(Device* dev, ButtonID btn) {
             dev->last_played_pad >= 0 &&
             dev->last_played_pad < 32 &&
             dev->pad_has_sample[dev->last_played_pad]) {
+            if (dev->state.buttons[BTN_MARK].lit) {
+                dev->mark_pending_action = 3;
+                dev->mark_action_pad = dev->last_played_pad;
+                display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);
+                return;
+            }
             dev->sampling_state = SAMPLING_MARK_EDIT;
             dev->mark_edit_pad = dev->last_played_pad;
             dev->mark_pending_action = 1;
@@ -889,11 +909,24 @@ void button_down(Device* dev, ButtonID btn) {
          dev->sampling_state == SAMPLING_RESAMPLE_DEST ||
          dev->sampling_state == SAMPLING_RESAMPLE_ARMED) &&
         is_effect_btn(btn)) {
-        dev->active_effect_btn = (int)btn;
+        const int last_pad = dev->last_played_pad;
+        const bool same_effect = (dev->active_effect_btn == (int)btn);
+
         if (dev->state.buttons[BTN_REMAIN].pressed) {
+            dev->active_effect_btn = (int)btn;
             for (int i = 0; i < 32; ++i) dev->pad_has_effect[i] = true;
-        } else if (dev->last_played_pad >= 0) {
-            dev->pad_has_effect[dev->last_played_pad] = !dev->pad_has_effect[dev->last_played_pad];
+        } else if (last_pad >= 0 && last_pad < 32) {
+            if (same_effect) {
+                dev->pad_has_effect[last_pad] = !dev->pad_has_effect[last_pad];
+                if (!dev->pad_has_effect[last_pad]) {
+                    dev->active_effect_btn = -1;
+                }
+            } else {
+                dev->active_effect_btn = (int)btn;
+                dev->pad_has_effect[last_pad] = true;
+            }
+        } else {
+            dev->active_effect_btn = same_effect ? -1 : (int)btn;
         }
         return;
     }
@@ -1112,6 +1145,12 @@ void tick(Device* dev, uint32_t samples_elapsed) {
     }
     else if (dev->sampling_state == SAMPLING_RESAMPLE_SOURCE) {
         dev->state.buttons[BTN_RESAMPLE].lit = true;
+        int bank_start = dev->state.active_bank * 8;
+        for (int i = 0; i < 8; ++i) {
+            if (dev->pad_led_hold_frames[bank_start + i] > 0) {
+                dev->state.buttons[BTN_PAD_1 + i].lit = true;
+            }
+        }
         if (dev->rec_gain_display_frames > 0) {
             set_display_number_plain(dev, dev->rec_gain_value);
         } else {
@@ -1689,6 +1728,11 @@ void set_time_bpm_display_off(Device* dev) {
 void set_time_bpm_display_pattern(Device* dev) {
     if (!dev) return;
     display_raw(dev, SEG_PTN[0], SEG_PTN[1], SEG_PTN[2]);
+}
+
+void set_pad_led_hold_frames(Device* dev, int pad_index, int frames) {
+    if (!dev || pad_index < 0 || pad_index >= 32) return;
+    dev->pad_led_hold_frames[pad_index] = std::max(frames, 0);
 }
 
 int get_active_effect_btn(const Device* dev) {

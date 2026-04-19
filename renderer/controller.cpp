@@ -268,11 +268,16 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     int mark_pad_action = sp303::get_mark_edit_pad(dev);
     int mark_action = sp303::consume_mark_action(dev);
     if (mark_action != 0 && mark_pad_action >= 0 && sp303::pad_has_sample(dev, mark_pad_action)) {
-        int playhead = sp303::audio_get_sample_playhead(audio, mark_pad_action);
-        if (mark_action == 1) {
-            sp303::audio_set_sample_start(audio, mark_pad_action, playhead);
-        } else if (mark_action == 2) {
-            sp303::audio_set_sample_end(audio, mark_pad_action, playhead);
+        if (mark_action == 3) {
+            sp303::audio_set_sample_start(audio, mark_pad_action, 0);
+            sp303::audio_set_sample_end(audio, mark_pad_action, 127);
+        } else {
+            int playhead = sp303::audio_get_sample_playhead(audio, mark_pad_action);
+            if (mark_action == 1) {
+                sp303::audio_set_sample_start(audio, mark_pad_action, playhead);
+            } else if (mark_action == 2) {
+                sp303::audio_set_sample_end(audio, mark_pad_action, playhead);
+            }
         }
     }
 
@@ -429,13 +434,24 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     }
 
     if (!sp303::is_start_end_level_mode(dev) &&
-        sp303::get_active_effect_btn(dev) == sp303::BTN_PITCH) {
-        if (active_knob == sp303::KNOB_CUTOFF) {
-            sp303::display_raw(dev, sp303::SEG_PIT[0], sp303::SEG_PIT[1], sp303::SEG_PIT[2]);
-        } else if (active_knob == sp303::KNOB_RESONANCE) {
-            sp303::display_raw(dev, sp303::SEG_FDB[0], sp303::SEG_FDB[1], sp303::SEG_FDB[2]);
-        } else if (active_knob == sp303::KNOB_DRIVE) {
-            sp303::display_raw(dev, sp303::SEG_DAL[0], sp303::SEG_DAL[1], sp303::SEG_DAL[2]);
+        !sp303::is_time_bpm_mode(dev)) {
+        int active_fx = sp303::get_active_effect_btn(dev);
+        if (active_fx == sp303::BTN_PITCH) {
+            if (active_knob == sp303::KNOB_CUTOFF) {
+                sp303::display_raw(dev, sp303::SEG_PIT[0], sp303::SEG_PIT[1], sp303::SEG_PIT[2]);
+            } else if (active_knob == sp303::KNOB_RESONANCE) {
+                sp303::display_raw(dev, sp303::SEG_FDB[0], sp303::SEG_FDB[1], sp303::SEG_FDB[2]);
+            } else if (active_knob == sp303::KNOB_DRIVE) {
+                sp303::display_raw(dev, sp303::SEG_DAL[0], sp303::SEG_DAL[1], sp303::SEG_DAL[2]);
+            }
+        } else if (active_fx == sp303::BTN_FILTER_DRIVE) {
+            if (active_knob == sp303::KNOB_CUTOFF) {
+                sp303::display_raw(dev, sp303::SEG_COT[0], sp303::SEG_COT[1], sp303::SEG_COT[2]);
+            } else if (active_knob == sp303::KNOB_RESONANCE) {
+                sp303::display_raw(dev, sp303::SEG_FDB[0], sp303::SEG_FDB[1], sp303::SEG_FDB[2]);
+            } else if (active_knob == sp303::KNOB_DRIVE) {
+                sp303::display_raw(dev, sp303::SEG_DRV[0], sp303::SEG_DRV[1], sp303::SEG_DRV[2]);
+            }
         }
     }
 

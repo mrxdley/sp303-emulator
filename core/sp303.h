@@ -168,6 +168,8 @@ extern const uint8_t SEG_PIT[3];     // "Pit" across all 3 digits
 extern const uint8_t SEG_FDB[3];     // "Fdb" across all 3 digits
 extern const uint8_t SEG_OFF[3];     // "oFF" across all 3 digits
 extern const uint8_t SEG_PTN[3];     // "Ptn" across all 3 digits
+extern const uint8_t SEG_COT[3];     // "CoT" across all 3 digits
+extern const uint8_t SEG_DRV[3];     // "dRV" across all 3 digits
 
 struct Display {
     uint8_t digit[3]; // [0] = leftmost, [2] = rightmost
@@ -284,7 +286,7 @@ int  get_sample_level_threshold  (const Device* dev);  // 0-8
 int  get_last_played_pad         (const Device* dev);  // -1 if none
 int  get_time_bpm_pad            (const Device* dev);  // -1 if none
 int  consume_record_bpm_quantize (Device* dev);        // -1 if none, else 40-200
-int  consume_mark_action         (Device* dev);        // 0 none, 1 start, 2 end
+int  consume_mark_action         (Device* dev);        // 0 none, 1 start, 2 end, 3 reset full
 int  get_mark_edit_pad           (const Device* dev);  // -1 if none
 bool get_pad_loop_mode           (const Device* dev, int pad_index); // false=one-shot
 bool get_pad_gate_mode           (const Device* dev, int pad_index); // false=trigger
@@ -300,6 +302,7 @@ void set_sample_level_threshold(Device* dev, int level);
 void set_time_bpm_display_number(Device* dev, int value);
 void set_time_bpm_display_off(Device* dev);
 void set_time_bpm_display_pattern(Device* dev);
+void set_pad_led_hold_frames(Device* dev, int pad_index, int frames);
 
 // Effect routing query
 int  get_active_effect_btn(const Device* dev);               // -1 or ButtonID of globally active effect
