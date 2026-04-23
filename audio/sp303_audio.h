@@ -69,14 +69,18 @@ int  audio_get_sample_time_mode(Audio* a, int slot);        // 0=off 1=custom 2=
 int  audio_get_sample_time_target_bpm(Audio* a, int slot);  // custom bpm or -1
 void audio_set_pattern_bpm(Audio* a, int bpm);              // 40-200
 int  audio_get_pattern_bpm(Audio* a);                       // 40-200
+void audio_set_delay_bpm  (Audio* a, float bpm);            // BPM for note-synced delay
 void audio_trigger_metronome(Audio* a, int level, bool accent);
 int  audio_get_sample_playhead(Audio* a, int slot);         // 0-127 absolute within sample
-int  audio_get_pad_led_hold_frames(Audio* a, int slot, bool reverse); // playback length in UI frames + 3s tail
+int  audio_get_pad_led_hold_frames(Audio* a, int slot, bool reverse); // playback length in UI frames
+float audio_velocity_gain_from_midi(int velocity); // MIDI 1..127 -> 0..1 attenuation multiplier
 
 // ─── Playback ─────────────────────────────────────────────────────────────────
 
 void audio_trigger(Audio* a, int slot); // legacy one-shot trigger
 void audio_trigger_mode(Audio* a, int slot, bool loop, bool gate, bool reverse);
+void audio_trigger_velocity(Audio* a, int slot, float velocity);
+void audio_trigger_mode_velocity(Audio* a, int slot, bool loop, bool gate, bool reverse, float velocity);
 void audio_note_off    (Audio* a, int slot); // for gate mode release
 bool audio_is_playing  (Audio* a, int slot);
 void audio_stop        (Audio* a, int slot); // silence all voices on slot

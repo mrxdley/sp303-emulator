@@ -29,7 +29,7 @@ static void enqueue_events_between(PatternSequencer* seq, int slot, int start_ti
     if (!pattern.assigned) return;
     for (const auto& ev : pattern.events) {
         if (ev.tick >= start_tick && ev.tick < end_tick) {
-            seq->pending_triggers.push_back(ev.sample_pad);
+            seq->pending_triggers.push_back(ev);
         }
     }
 }
@@ -43,6 +43,7 @@ static void sort_events(PatternSequencer* seq, int slot) {
     auto& events = seq->slots[slot].events;
     std::sort(events.begin(), events.end(), [](const PatternEvent& a, const PatternEvent& b) {
         if (a.tick != b.tick) return a.tick < b.tick;
+        if (a.velocity != b.velocity) return a.velocity < b.velocity;
         return a.sample_pad < b.sample_pad;
     });
 }
@@ -173,6 +174,7 @@ bool pattern_append_event(PatternSequencer* seq, int slot, const PatternEvent& e
     int length_ticks = pattern_length_ticks(seq, slot);
     PatternEvent clamped = event;
     clamped.tick = std::clamp(clamped.tick, 0, std::max(0, length_ticks - 1));
+    clamped.velocity = std::clamp(clamped.velocity, 1, 127);
     seq->slots[slot].events.push_back(clamped);
     seq->slots[slot].assigned = true;
     sort_events(seq, slot);
@@ -315,7 +317,7 @@ void pattern_stop_record(PatternSequencer* seq) {
     seq->pending_metronome.clear();
 }
 
-void pattern_record_pad_hit(PatternSequencer* seq, int sample_pad) {
+void pattern_record_pad_hit(PatternSequencer* seq, int sample_pad, int velocity) {
     if (!seq || !seq->recording || seq->count_in) return;
     if (seq->record_slot < 0 || seq->record_slot >= PatternSequencer::SLOT_COUNT) return;
     if (sample_pad < 0 || sample_pad >= PatternSequencer::SLOT_COUNT) return;
@@ -330,7 +332,7 @@ void pattern_record_pad_hit(PatternSequencer* seq, int sample_pad) {
     tick %= length_ticks;
     if (tick < 0) tick += length_ticks;
 
-    slot.events.push_back({tick, sample_pad});
+    slot.events.push_back({tick, sample_pad, std::clamp(velocity, 1, 127)});
     slot.assigned = true;
     sort_events(seq, seq->record_slot);
 }
@@ -391,11 +393,11 @@ void pattern_advance(PatternSequencer* seq, uint32_t samples_elapsed, uint32_t s
     seq->tick_position = next;
 }
 
-int pattern_consume_trigger(PatternSequencer* seq) {
-    if (!seq || seq->pending_triggers.empty()) return -1;
-    int out = seq->pending_triggers.front();
+bool pattern_consume_trigger(PatternSequencer* seq, PatternEvent* out) {
+    if (!seq || !out || seq->pending_triggers.empty()) return false;
+    *out = seq->pending_triggers.front();
     seq->pending_triggers.erase(seq->pending_triggers.begin());
-    return out;
+    return true;
 }
 
 int pattern_consume_metronome(PatternSequencer* seq) {

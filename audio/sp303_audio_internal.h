@@ -28,6 +28,7 @@ struct Voice {
     uint32_t loop_start   = 0;
     uint32_t end_position = 0;
     float    gain         = 1.0f;
+    float    velocity     = 1.0f;
     bool     looping      = false;
     bool     reverse      = false;
     bool     active       = false;

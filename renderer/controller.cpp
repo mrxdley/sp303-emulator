@@ -1,10 +1,13 @@
 #include "controller.h"
+#include "card_io.h"
+#include "effect.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
 
 #include <nlohmann/json.hpp>
 
@@ -20,6 +23,7 @@ static const char* AUDIO_CFG_FILE = "audio_config.json";
 struct AppConfig {
     sp303::AudioConfig audio{};
     float peak_threshold = DEFAULT_PEAK_THRESHOLD;
+    std::string card_path = "cards/default";
 };
 
 static float sample_level_threshold_to_peak(int level) {
@@ -59,7 +63,8 @@ static bool knob_mode_owns_input_gain(sp303::Device* dev) {
 }
 
 static bool knob_mode_owns_effect_params(sp303::Device* dev) {
-    return !sp303::is_start_end_level_mode(dev) &&
+    return sp303::get_active_effect_btn(dev) != -1 &&
+           !sp303::is_start_end_level_mode(dev) &&
            !sp303::is_time_bpm_mode(dev) &&
            !sp303::is_sampling_standby(dev) &&
            !sp303::is_sampling_ready(dev) &&
@@ -99,6 +104,9 @@ static AppConfig load_app_config() {
         if (j.contains("peak_threshold")) {
             cfg.peak_threshold = std::clamp(j["peak_threshold"].get<float>(), 0.0f, 1.0f);
         }
+        if (j.contains("card_path")) {
+            cfg.card_path = j["card_path"].get<std::string>();
+        }
     } catch (...) {}
     return cfg;
 }
@@ -111,8 +119,109 @@ static void save_app_config(const RendererController* c) {
     j["rate"]   = c->audio_cfg.sample_rate;
     j["buffer"] = c->audio_cfg.buffer_frames;
     j["peak_threshold"] = c->peak_threshold;
+    j["card_path"] = c->card_path;
     std::ofstream f(AUDIO_CFG_FILE);
     f << j.dump(2);
+}
+
+void renderer_controller_refresh_cards(RendererController* c) {
+    if (!c) return;
+    c->card_dirs.clear();
+    std::error_code ec;
+    std::filesystem::create_directories("cards", ec);
+    for (const auto& entry : std::filesystem::directory_iterator("cards", ec)) {
+        if (entry.is_directory()) {
+            c->card_dirs.push_back(entry.path().generic_string());
+        }
+    }
+    std::sort(c->card_dirs.begin(), c->card_dirs.end());
+    if (c->card_dirs.empty()) {
+        c->card_dirs.push_back("cards/default");
+        std::filesystem::create_directories(c->card_dirs[0], ec);
+    }
+    auto it = std::find(c->card_dirs.begin(), c->card_dirs.end(), c->card_path);
+    if (it == c->card_dirs.end()) {
+        c->card_dirs.push_back(c->card_path);
+        std::sort(c->card_dirs.begin(), c->card_dirs.end());
+        it = std::find(c->card_dirs.begin(), c->card_dirs.end(), c->card_path);
+    }
+    c->sel_card = (it != c->card_dirs.end()) ? (int)std::distance(c->card_dirs.begin(), it) : 0;
+}
+
+bool renderer_controller_mount_card(RendererController* c, sp303::Device* dev) {
+    if (!c || !dev || !c->audio) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(c->card_path, ec);
+    CardIoResult res = card_load(c->card_path, dev, c->audio, c->audio_cfg);
+    std::printf("[CARD] %s\n", res.message.c_str());
+    return res.ok;
+}
+
+static void memory_card_backup_save_samples(sp303::Audio* audio, sp303::Device* dev, int backup_slot) {
+    if (!audio || !dev || backup_slot < 0 || backup_slot >= 8) return;
+    sp303::set_memory_card_backup_kind(dev, backup_slot, sp303::MEMORY_CARD_BACKUP_SAMPLES);
+    for (int slot = 0; slot < 16; ++slot) {
+        sp303::PadProjectState state{};
+        sp303::get_pad_project_state(dev, slot, &state);
+        sp303::set_memory_card_backup_sample_state(dev, backup_slot, slot, state);
+        if (!state.has_sample) {
+            sp303::set_memory_card_backup_sample_audio(dev, backup_slot, slot, nullptr, 0, 1);
+            sp303::set_memory_card_backup_sample_edit(dev, backup_slot, slot, 0, 127, 127, 0, 0, -1);
+            continue;
+        }
+        std::vector<float> pcm;
+        uint32_t channels = 1;
+        uint32_t frames = 0;
+        if (!sp303::audio_export_sample(audio, slot, &pcm, &channels, &frames)) {
+            pcm.clear();
+            channels = 1;
+            frames = 0;
+        }
+        sp303::set_memory_card_backup_sample_audio(dev, backup_slot, slot, pcm.data(), frames, channels);
+        sp303::set_memory_card_backup_sample_edit(
+            dev, backup_slot, slot,
+            sp303::audio_get_sample_start(audio, slot),
+            sp303::audio_get_sample_end(audio, slot),
+            sp303::audio_get_sample_level(audio, slot),
+            sp303::audio_get_sample_bpm_adjust(audio, slot),
+            sp303::audio_get_sample_time_mode(audio, slot),
+            sp303::audio_get_sample_time_target_bpm(audio, slot));
+    }
+}
+
+static void memory_card_backup_load_samples(sp303::Audio* audio, sp303::Device* dev, int backup_slot) {
+    if (!audio || !dev || backup_slot < 0 || backup_slot >= 8) return;
+    for (int slot = 0; slot < 16; ++slot) {
+        sp303::audio_clear_sample(audio, slot);
+        sp303::pad_clear_sample(dev, slot);
+    }
+    for (int slot = 0; slot < 16; ++slot) {
+        sp303::PadProjectState state{};
+        if (!sp303::get_memory_card_backup_sample_state(dev, backup_slot, slot, &state)) {
+            continue;
+        }
+        if (state.has_sample) {
+            std::vector<float> pcm;
+            uint32_t channels = 1;
+            uint32_t frames = 0;
+            if (sp303::get_memory_card_backup_sample_audio(dev, backup_slot, slot, &pcm, &channels, &frames) &&
+                !pcm.empty() && frames > 0) {
+                sp303::audio_import_sample(audio, slot, pcm.data(), frames, channels);
+                int start_127 = 0, end_127 = 127, level_127 = 127;
+                int bpm_adjust = 0, time_mode = 0, time_target_bpm = -1;
+                sp303::get_memory_card_backup_sample_edit(dev, backup_slot, slot,
+                    &start_127, &end_127, &level_127, &bpm_adjust, &time_mode, &time_target_bpm);
+                sp303::audio_set_sample_start(audio, slot, start_127);
+                sp303::audio_set_sample_end(audio, slot, end_127);
+                sp303::audio_set_sample_level(audio, slot, level_127);
+                sp303::audio_set_sample_bpm_adjust(audio, slot, bpm_adjust);
+                sp303::audio_set_sample_time_mode(audio, slot, time_mode, time_target_bpm);
+            } else {
+                state.has_sample = false;
+            }
+        }
+        sp303::set_pad_project_state(dev, slot, state);
+    }
 }
 
 void renderer_controller_refresh_devices(RendererController* c) {
@@ -134,9 +243,11 @@ bool renderer_controller_init(RendererController* c) {
     AppConfig cfg = load_app_config();
     c->audio_cfg = cfg.audio;
     c->peak_threshold = cfg.peak_threshold;
+    c->card_path = cfg.card_path;
     c->audio = sp303::audio_create(&c->audio_cfg);
     c->playback_ok = (c->audio != nullptr);
     renderer_controller_refresh_devices(c);
+    renderer_controller_refresh_cards(c);
 
     for (int i = 0; i < (int)c->out_devs.size(); ++i) {
         if (std::strncmp(c->out_devs[i].name, c->audio_cfg.output_name, sp303::AUDIO_NAME_LEN) == 0) {
@@ -234,10 +345,25 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     }
     c->config_input_peak = input_peak;
 
+    // MFX held: CTRL 3 changes mfx_type instead of effect p3.
+    const bool mfx_held = state.buttons[sp303::BTN_MFX].pressed;
     bool input_gain_mode = knob_mode_owns_input_gain(dev);
-    bool effect_param_mode = knob_mode_owns_effect_params(dev);
+    bool effect_param_mode = knob_mode_owns_effect_params(dev) && !mfx_held;
+    if (effect_param_mode && !c->was_effect_param_mode) {
+        // Re-entering effect control: restore the knob-owned FX cache so
+        // sample edit / time-bpm / resample gain values do not leak into FX.
+        sp303::knob_set(dev, sp303::KNOB_CUTOFF, c->cached_fx_p1);
+        sp303::knob_set(dev, sp303::KNOB_RESONANCE, c->cached_fx_p2);
+        // Skip KNOB_DRIVE restore while MFX held — it would corrupt mfx_type
+        if (!mfx_held)
+            sp303::knob_set(dev, sp303::KNOB_DRIVE, c->cached_fx_p3);
+        state = sp303::get_state(dev);
+    }
     if (input_gain_mode && !c->was_input_gain_mode) {
         sp303::knob_set(dev, sp303::KNOB_DRIVE, c->cached_input_gain);
+        if (sp303::is_resample_source_select(dev)) {
+            sp303::clear_input_gain_display(dev);
+        }
         state = sp303::get_state(dev);
     }
     if (input_gain_mode) {
@@ -246,7 +372,8 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     if (effect_param_mode) {
         c->cached_fx_p1 = state.knobs[sp303::KNOB_CUTOFF].value;
         c->cached_fx_p2 = state.knobs[sp303::KNOB_RESONANCE].value;
-        c->cached_fx_p3 = state.knobs[sp303::KNOB_DRIVE].value;
+        if (!mfx_held)
+            c->cached_fx_p3 = state.knobs[sp303::KNOB_DRIVE].value;
     }
 
     sp303::audio_set_input_gain(audio, c->cached_input_gain);
@@ -266,8 +393,24 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
             c->cached_fx_p1,
             c->cached_fx_p2,
             c->cached_fx_p3);
+
+        // Compute BPM for note-synced delay
+        if (active_btn == sp303::BTN_DELAY) {
+            float delay_bpm = 120.0f;
+            if (sp303::is_pattern_mode(dev)) {
+                delay_bpm = static_cast<float>(sp303::get_pattern_bpm(dev));
+            } else {
+                for (int i = 0; i < 32; ++i) {
+                    if (!((pad_mask >> i) & 1u)) continue;
+                    int bpm = sp303::audio_get_sample_bpm(audio, i);
+                    if (bpm >= 40) { delay_bpm = static_cast<float>(bpm); break; }
+                }
+            }
+            sp303::audio_set_delay_bpm(audio, delay_bpm);
+        }
     }
     c->was_input_gain_mode = input_gain_mode;
+    c->was_effect_param_mode = effect_param_mode;
 
     sp303::audio_set_pattern_bpm(audio, sp303::get_pattern_bpm(dev));
 
@@ -293,16 +436,18 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     c->was_pattern_record_select = sp303::is_pattern_record_select(dev) && !sp303::is_pattern_recording(dev);
 
     for (;;) {
-        int slot = sp303::consume_pattern_trigger(dev);
-        if (slot < 0) break;
+        sp303::PatternProjectEvent pev{};
+        if (!sp303::consume_pattern_trigger(dev, &pev)) break;
+        int slot = pev.sample_pad;
         if (!sp303::pad_has_sample(dev, slot)) continue;
         bool loop_mode = sp303::get_pad_loop_mode(dev, slot);
         bool gate_mode = sp303::get_pad_gate_mode(dev, slot);
         bool reverse_mode = sp303::get_pad_reverse_mode(dev, slot);
         int hold_frames = sp303::audio_get_pad_led_hold_frames(audio, slot, reverse_mode);
         sp303::set_pad_led_hold_frames(dev, slot, hold_frames);
-        sp303::note_pattern_pad_played(dev, slot);
-        sp303::audio_trigger_mode(audio, slot, loop_mode, gate_mode, reverse_mode);
+        sp303::note_pattern_pad_played(dev, slot, pev.velocity);
+        sp303::audio_trigger_mode_velocity(audio, slot, loop_mode, gate_mode, reverse_mode,
+                                           sp303::audio_velocity_gain_from_midi(pev.velocity));
     }
     for (;;) {
         int metro = sp303::consume_pattern_metronome(dev);
@@ -348,14 +493,20 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     int mark_pad_action = sp303::get_mark_edit_pad(dev);
     int mark_action = sp303::consume_mark_action(dev);
     if (mark_action != 0 && mark_pad_action >= 0 && sp303::pad_has_sample(dev, mark_pad_action)) {
+        std::printf("[MARK] consume action=%d bank=%c pad=%d\n",
+                    mark_action, "ABCD"[mark_pad_action / 8], (mark_pad_action % 8) + 1);
         if (mark_action == 3) {
+            std::printf("[MARK] apply reset full -> start=0 end=127\n");
             sp303::audio_set_sample_start(audio, mark_pad_action, 0);
             sp303::audio_set_sample_end(audio, mark_pad_action, 127);
         } else {
             int playhead = sp303::audio_get_sample_playhead(audio, mark_pad_action);
+            std::printf("[MARK] apply playhead=%d\n", playhead);
             if (mark_action == 1) {
+                std::printf("[MARK] set START -> %d\n", playhead);
                 sp303::audio_set_sample_start(audio, mark_pad_action, playhead);
             } else if (mark_action == 2) {
+                std::printf("[MARK] set END -> %d\n", playhead);
                 sp303::audio_set_sample_end(audio, mark_pad_action, playhead);
             }
         }
@@ -408,6 +559,7 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
             sp303::set_time_bpm_display_number(dev, c->time_bpm_display_value);
         }
     } else if (!is_editing_sample &&
+               !mfx_held &&
                !sp303::is_pattern_mode(dev) &&
                !sp303::is_sampling_standby(dev) &&
                !sp303::is_sampling_ready(dev) &&
@@ -515,25 +667,42 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     if (sp303::consume_swap_pads(dev, &swap_a, &swap_b)) {
         sp303::audio_swap_samples(audio, swap_a, swap_b);
     }
+    int card_sample_save_slot = sp303::consume_memory_card_sample_save(dev);
+    if (card_sample_save_slot >= 0) {
+        memory_card_backup_save_samples(audio, dev, card_sample_save_slot);
+    }
+    int card_sample_load_slot = sp303::consume_memory_card_sample_load(dev);
+    if (card_sample_load_slot >= 0) {
+        memory_card_backup_load_samples(audio, dev, card_sample_load_slot);
+    }
+    if (sp303::consume_memory_card_dirty(dev)) {
+        CardIoResult res = card_save(c->card_path, dev, audio, c->audio_cfg);
+        if (!res.ok) {
+            std::printf("[CARD] %s\n", res.message.c_str());
+        }
+    }
 
     if (!sp303::is_start_end_level_mode(dev) &&
-        !sp303::is_time_bpm_mode(dev)) {
-        int active_fx = sp303::get_active_effect_btn(dev);
-        if (active_fx == sp303::BTN_PITCH) {
-            if (active_knob == sp303::KNOB_CUTOFF) {
-                sp303::display_raw(dev, sp303::SEG_PIT[0], sp303::SEG_PIT[1], sp303::SEG_PIT[2]);
-            } else if (active_knob == sp303::KNOB_RESONANCE) {
-                sp303::display_raw(dev, sp303::SEG_FDB[0], sp303::SEG_FDB[1], sp303::SEG_FDB[2]);
-            } else if (active_knob == sp303::KNOB_DRIVE) {
-                sp303::display_raw(dev, sp303::SEG_DAL[0], sp303::SEG_DAL[1], sp303::SEG_DAL[2]);
-            }
-        } else if (active_fx == sp303::BTN_FILTER_DRIVE) {
-            if (active_knob == sp303::KNOB_CUTOFF) {
-                sp303::display_raw(dev, sp303::SEG_COT[0], sp303::SEG_COT[1], sp303::SEG_COT[2]);
-            } else if (active_knob == sp303::KNOB_RESONANCE) {
-                sp303::display_raw(dev, sp303::SEG_FDB[0], sp303::SEG_FDB[1], sp303::SEG_FDB[2]);
-            } else if (active_knob == sp303::KNOB_DRIVE) {
-                sp303::display_raw(dev, sp303::SEG_DRV[0], sp303::SEG_DRV[1], sp303::SEG_DRV[2]);
+        !sp303::is_time_bpm_mode(dev) &&
+        !knob_mode_owns_input_gain(dev) &&
+        !mfx_held) {
+        int active_fx  = sp303::get_active_effect_btn(dev);
+        int mfx_sub    = sp303::get_mfx_type(dev);
+        int def_idx    = sp303::fx_btn_to_index(active_fx, mfx_sub);
+        if (def_idx >= 0 && def_idx < sp303::FX_SLOT_COUNT) {
+            const sp303::EffectDef& def = sp303::FX_DEFS[def_idx];
+            const char* label = nullptr;
+            if      (active_knob == sp303::KNOB_CUTOFF)    label = def.p1_label;
+            else if (active_knob == sp303::KNOB_RESONANCE) label = def.p2_label;
+            else if (active_knob == sp303::KNOB_DRIVE)     label = def.p3_label;
+
+            // Delay p1: show note value instead of static label
+            if (active_fx == sp303::BTN_DELAY && active_knob == sp303::KNOB_CUTOFF) {
+                uint8_t segs[3];
+                sp303::delay_note_display(c->cached_fx_p1, segs);
+                sp303::display_raw(dev, segs[0], segs[1], segs[2]);
+            } else if (label) {
+                sp303::display_str3(dev, label);
             }
         }
     }

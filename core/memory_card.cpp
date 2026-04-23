@@ -5,7 +5,7 @@ namespace sp303 {
 void memory_card_reset(MemoryCardState* card) {
     if (!card) return;
     *card = {};
-    card->formatted = false;
+    card->formatted = true;
     card->write_protected = false;
 }
 

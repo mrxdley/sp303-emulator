@@ -72,6 +72,24 @@ audio/effects/
   - this can make pitched-down playback feel truncated even though there is no separate "hard time cap"
   - fix later by auditing the pitch playback cursor and stop condition together, not independently
 
+### MFX Coverage Note
+- Hardware MFX provides 21 distinct algorithms.
+- Current emulator implements:
+  - `MFX 1 = reverb`
+  - `MFX 2 = tape echo`
+  - `MFX 3 = chorus`
+  - `MFX 4 = flanger`
+  - `MFX 5 = phaser`
+  - `MFX 6 = tremolo/pan`
+- `mfx_type` still ranges `1..21` in the UI/chord, but only subtype 1 currently resolves to DSP.
+- `mfx_type` still ranges `1..21` in the UI/chord, but subtypes `7..21` still do not resolve to DSP yet.
+- Add the remaining real MFX algorithms later:
+  - wah
+  - slicer
+  - compressor-style variants
+  - and the rest of the SP-303 MFX family
+- Do not alias dedicated effects like `PITCH` or `DELAY` through MFX.
+
 ### Knob Ownership
 - Knob meaning should be explicit per state.
 - Do not let CTRL 3 / MFX meaning leak across unrelated modes.
@@ -79,7 +97,7 @@ audio/effects/
 
 ### Pattern / Tap Tempo Notes
 - Pattern tap-tempo BPM is now displayed for 3 seconds after enough taps are collected.
-- Treat that value as debug-helpful, not hardware-accurate.
+- Treat that value as debug-helpful, not hardware-accurate, so add it to conveniuences.
 - The tap BPM is derived from a short 4-tap average and may drift from the original unit's feel or rounding behavior.
 
 ### Convenience Features
@@ -90,9 +108,7 @@ audio/effects/
   - keep this clearly marked as emulator-only behavior, not SP-303-authentic behavior
 - Consider emulator-only resampling of live pattern playback.
 - Keep this explicitly marked as a convenience feature unless the manual confirms an equivalent workflow.
-
 ## Truncate Workflow (From SP-303 Manual)
-
 - Implement sample truncate mode that deletes unused waveform outside current Start/End points.
 - Trigger flow:
   - `IDLE`: press pad with sample (becomes current pad).
@@ -101,8 +117,7 @@ audio/effects/
   - Press `MARK` -> `DEL` blinks, display `trC`.
   - Press `DEL` again to confirm truncate.
 - On confirm: rewrite sample data to keep only current playback region, then reset region to full sample.
-- Keep this as separate behavior from pad-delete mode (`DEL` + pad delete flow).
-
+- Keep this as separate behavior 
 ### Scope Note
 
 - Do **not** implement dots/loading progress animation or artificial delays.
@@ -111,6 +126,11 @@ audio/effects/
 ## Behavior Research
 
 - Check SP-Forums/manual behavior for `LONG/LO-FI` pressed during recording and across other states, then align state-machine behavior.
+- MARK gate-playback logic still needs manual verification and implementation review.
+- Known UI issue: when a pad is pressed while `MARK` is held, pad-lit feedback is not currently correct.
 
 stub velocity for MIDI input later
-resampling LVL - 0-127 persisitent
+there is innacuracies in how vinyl sim is implemented -> gain on CMP
+ADD effect grab functionality.
+check all instances of tapp tempo
+figure out: can we apply FX to a pad with no sample? i think so?

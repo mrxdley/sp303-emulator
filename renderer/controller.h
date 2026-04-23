@@ -4,11 +4,15 @@
 #include "sp303_audio.h"
 
 #include <vector>
+#include <string>
 
 struct RendererController {
     sp303::Audio* audio = nullptr;
     sp303::AudioConfig audio_cfg{};
     float peak_threshold = 0.05f;
+    std::string card_path = "cards/default";
+    std::vector<std::string> card_dirs;
+    int sel_card = 0;
 
     std::vector<sp303::AudioDeviceInfo> out_devs;
     std::vector<sp303::AudioDeviceInfo> in_devs;
@@ -25,6 +29,7 @@ struct RendererController {
     bool was_editing_sample = false;
     bool was_time_bpm_mode = false;
     bool was_input_gain_mode = false;
+    bool was_effect_param_mode = false;
     bool was_pattern_record_select = false;
     int pattern_preview_beat_index = 0;
     int time_bpm_display_kind = 0; // 0=number, 1=off, 2=pattern
@@ -41,3 +46,5 @@ void renderer_controller_shutdown(RendererController* c);
 sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev, int active_knob);
 void renderer_controller_refresh_devices(RendererController* c);
 bool renderer_controller_apply_audio_config(RendererController* c);
+void renderer_controller_refresh_cards(RendererController* c);
+bool renderer_controller_mount_card(RendererController* c, sp303::Device* dev);

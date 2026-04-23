@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <vector>
 
 namespace sp303 {
 
@@ -165,12 +166,18 @@ extern const uint8_t SEG_DAL[3];     // "dAL" across all 3 digits
 extern const uint8_t SEG_CHG[3];     // "CHG" across all 3 digits
 extern const uint8_t SEG_LEV[3];     // "LEV" across all 3 digits
 extern const uint8_t SEG_ERS[3];     // "ErS" across all 3 digits
+extern const uint8_t SEG_FMT[3];     // "FMt" across all 3 digits
+extern const uint8_t SEG_EMP[3];     // "EMP" across all 3 digits
+extern const uint8_t SEG_PRT[3];     // "Prt" across all 3 digits
 extern const uint8_t SEG_PIT[3];     // "Pit" across all 3 digits
 extern const uint8_t SEG_FDB[3];     // "Fdb" across all 3 digits
 extern const uint8_t SEG_OFF[3];     // "oFF" across all 3 digits
 extern const uint8_t SEG_PTN[3];     // "Ptn" across all 3 digits
 extern const uint8_t SEG_COT[3];     // "CoT" across all 3 digits
 extern const uint8_t SEG_DRV[3];     // "dRV" across all 3 digits
+extern const uint8_t SEG_LO[3];      // "Lo " across all 3 digits
+extern const uint8_t SEG_MID[3];     // "Mid" across all 3 digits
+extern const uint8_t SEG_HI[3];      // "Hi " across all 3 digits
 
 struct Display {
     uint8_t digit[3]; // [0] = leftmost, [2] = rightmost
@@ -227,6 +234,7 @@ struct PadProjectState {
 struct PatternProjectEvent {
     int tick = 0;
     int sample_pad = 0;
+    int velocity = 127;
 };
 
 struct PatternProjectSlot {
@@ -234,6 +242,12 @@ struct PatternProjectSlot {
     int length_measures = 1;
     int quantize = 4;
     int metronome_level = 100;
+};
+
+enum MemoryCardBackupKind {
+    MEMORY_CARD_BACKUP_EMPTY = 0,
+    MEMORY_CARD_BACKUP_SAMPLES,
+    MEMORY_CARD_BACKUP_PATTERNS,
 };
 
 // ─── Device handle ────────────────────────────────────────────────────────────
@@ -259,8 +273,10 @@ void tick(Device* dev, uint32_t samples_elapsed);
 State get_state(const Device* dev);
 
 // Display helpers
-void display_number(Device* dev, int n);                        // 0–999, left-pads with blanks
-void display_raw   (Device* dev, uint8_t d0, uint8_t d1, uint8_t d2);
+void display_number (Device* dev, int n);                       // 0–999, left-pads with blanks
+void display_raw    (Device* dev, uint8_t d0, uint8_t d1, uint8_t d2);
+uint8_t char_to_seg (char c);                                   // single char → segment byte
+void display_str3   (Device* dev, const char* label3);          // 3-char string → display
 
 // ─── Sampling control (renderer <-> core sync) ────────────────────────────────
 // These allow the renderer to query sampling state and control the audio engine.
@@ -287,12 +303,16 @@ int  get_resample_dest_pad  (const Device* dev);   // -1 if none
 void set_sampling_full     (Device* dev);         // called when audio buffer fills
 void start_threshold_recording (Device* dev);
 void finish_threshold_recording(Device* dev);
-void note_pad_played       (Device* dev, int pad_index);
+void note_pad_played       (Device* dev, int pad_index, int velocity = 127);
 void set_edit_display_value(Device* dev, int value);
 int  consume_deleted_pad   (Device* dev); // -1 if none
 int  consume_truncate_pad  (Device* dev); // -1 if none
 int  consume_delete_all_group(Device* dev); // -1 none, 0=A/B, 1=C/D
 bool consume_swap_pads     (Device* dev, int* pad_a, int* pad_b); // true if pending
+bool consume_memory_card_dirty(Device* dev);
+bool consume_memory_card_format(Device* dev);
+int  consume_memory_card_sample_save(Device* dev); // backup slot 0-7, else -1
+int  consume_memory_card_sample_load(Device* dev); // backup slot 0-7, else -1
 void set_mark_lit          (Device* dev, bool lit);
 void set_pad_playing       (Device* dev, int pad_index, bool playing);
 bool get_sampling_stereo   (const Device* dev);
@@ -310,16 +330,38 @@ int  get_pattern_metronome_level (const Device* dev);  // 0-127
 int  consume_record_bpm_quantize (Device* dev);        // -1 if none, else 40-200
 int  consume_mark_action         (Device* dev);        // 0 none, 1 start, 2 end, 3 reset full
 int  get_mark_edit_pad           (const Device* dev);  // -1 if none
-int  consume_pattern_trigger     (Device* dev);        // -1 if none
+bool consume_pattern_trigger     (Device* dev, PatternProjectEvent* out); // false if none
 int  consume_pattern_metronome   (Device* dev);        // 0 none, 1 weak, 2 strong
 bool get_pad_loop_mode           (const Device* dev, int pad_index); // false=one-shot
 bool get_pad_gate_mode           (const Device* dev, int pad_index); // false=trigger
 bool get_pad_reverse_mode        (const Device* dev, int pad_index); // false=forward
-void note_pattern_pad_played     (Device* dev, int pad_index);
+void note_pattern_pad_played     (Device* dev, int pad_index, int velocity = 127);
 bool get_pattern_project_slot    (const Device* dev, int slot, PatternProjectSlot* out);
 bool set_pattern_project_slot    (Device* dev, int slot, const PatternProjectSlot& state);
 bool get_pattern_project_events  (const Device* dev, int slot, PatternProjectEvent* out_events, int max_events, int* out_count);
 bool set_pattern_project_events  (Device* dev, int slot, const PatternProjectEvent* events, int count);
+bool get_memory_card_formatted   (const Device* dev);
+void set_memory_card_formatted   (Device* dev, bool formatted);
+bool get_memory_card_write_protected(const Device* dev);
+void set_memory_card_write_protected(Device* dev, bool write_protected);
+int  get_memory_card_backup_kind (const Device* dev, int backup_slot);
+void set_memory_card_backup_kind (Device* dev, int backup_slot, int kind);
+int  get_memory_card_backup_pattern_bpm(const Device* dev, int backup_slot);
+void set_memory_card_backup_pattern_bpm(Device* dev, int backup_slot, int bpm);
+bool get_memory_card_backup_sample_state(const Device* dev, int backup_slot, int index, PadProjectState* out);
+bool set_memory_card_backup_sample_state(Device* dev, int backup_slot, int index, const PadProjectState& state);
+bool get_memory_card_backup_sample_audio(const Device* dev, int backup_slot, int index, std::vector<float>* pcm, uint32_t* channels, uint32_t* frames);
+bool set_memory_card_backup_sample_audio(Device* dev, int backup_slot, int index, const float* pcm, uint32_t frames, uint32_t channels);
+bool get_memory_card_backup_sample_edit(const Device* dev, int backup_slot, int index,
+                                        int* start_127, int* end_127, int* level_127,
+                                        int* bpm_adjust, int* time_mode, int* time_target_bpm);
+bool set_memory_card_backup_sample_edit(Device* dev, int backup_slot, int index,
+                                        int start_127, int end_127, int level_127,
+                                        int bpm_adjust, int time_mode, int time_target_bpm);
+bool get_memory_card_backup_pattern_slot(const Device* dev, int backup_slot, int index, PatternProjectSlot* out);
+bool set_memory_card_backup_pattern_slot(Device* dev, int backup_slot, int index, const PatternProjectSlot& state);
+bool get_memory_card_backup_pattern_events(const Device* dev, int backup_slot, int index, PatternProjectEvent* out_events, int max_events, int* out_count);
+bool set_memory_card_backup_pattern_events(Device* dev, int backup_slot, int index, const PatternProjectEvent* events, int count);
 
 // Pad sample state (for UI display)
 bool pad_has_sample(const Device* dev, int pad_index);  // 0-31
@@ -332,6 +374,7 @@ void set_time_bpm_display_number(Device* dev, int value);
 void set_time_bpm_display_off(Device* dev);
 void set_time_bpm_display_pattern(Device* dev);
 void set_pad_led_hold_frames(Device* dev, int pad_index, int frames);
+void clear_input_gain_display(Device* dev);
 
 // Effect routing query
 int  get_active_effect_btn(const Device* dev);               // -1 or ButtonID of globally active effect

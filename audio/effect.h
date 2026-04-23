@@ -18,8 +18,18 @@ struct EffectParams {
 // Direct-Form-II-Transposed biquad state, one pair per channel (L/R).
 
 struct EffectVoiceState {
+    // Biquad states — FILTER+DRIVE uses s1/s2; ISOLATOR uses s1/s2 (LP) and s3/s4 (HP)
     float s1[2] = {};
     float s2[2] = {};
+    float s3[2] = {};
+    float s4[2] = {};
+
+    // VINYL SIM state
+    float    s5[2]             = {};             // noise 1-pole LP per channel
+    float    flutter_buf[2][256] = {};           // per-channel delay line (~5.3 ms at 48 kHz)
+    uint32_t flutter_write     = 0;              // write head in flutter_buf
+    float    lfo_phase         = 0.0f;           // wow/flutter LFO accumulator (radians)
+    uint32_t rand_state        = 0x12345678u;    // per-voice PRNG seed
 };
 
 // ─── Global bus state (bus effects: delay, reverb, …) ────────────────────────
@@ -29,10 +39,27 @@ struct GlobalEffectState {
     std::vector<float> buf;             // pre-allocated, stereo interleaved
     uint32_t           write_pos      = 0;
     uint32_t           capacity_frames = 0;
+    float              bpm            = 120.0f;  // used by note-synced effects (delay)
+
+    // Reverb auxiliary state: 4 comb + 2 allpass write heads and per-comb LP state.
+    uint32_t aux_pos[6]      = {};
+    float    aux_state[6][2] = {};
+    float    phase1          = 0.0f;
+    float    phase2          = 0.0f;
+    float    feedback[2]     = {};
+    float    ap_x1[8][2]     = {};
+    float    ap_y1[8][2]     = {};
 
     void clear() {
         std::fill(buf.begin(), buf.end(), 0.0f);
         write_pos = 0;
+        std::fill(std::begin(aux_pos), std::end(aux_pos), 0u);
+        for (auto& row : aux_state) row[0] = row[1] = 0.0f;
+        phase1 = 0.0f;
+        phase2 = 0.0f;
+        feedback[0] = feedback[1] = 0.0f;
+        for (auto& row : ap_x1) row[0] = row[1] = 0.0f;
+        for (auto& row : ap_y1) row[0] = row[1] = 0.0f;
     }
 };
 
@@ -58,7 +85,7 @@ struct EffectDef {
 
 // ─── Registry ─────────────────────────────────────────────────────────────────
 
-constexpr int FX_SLOT_COUNT = 3;
+constexpr int FX_SLOT_COUNT = 11;
 extern const EffectDef FX_DEFS[FX_SLOT_COUNT];
 
 // Map (active_effect_btn ButtonID, mfx_sub 0-20) → FX_DEFS index, or -1.
@@ -73,6 +100,42 @@ void filter_drive_frame  (float* lr, uint32_t channels,
 void delay_process_buffer(float* lr_interleaved, uint32_t frames,
                           const EffectParams& p, GlobalEffectState& st,
                           uint32_t sample_rate);
+
+// Returns 3 segment bytes for the delay time display (p1 = 0..1 = note index 0..12).
+// Byte 7 of each segment = decimal-point flag (matches sp303 display encoding).
+void delay_note_display(float p1, uint8_t out[3]);
+
+void isolator_frame(float* lr, uint32_t channels,
+                    const EffectParams& p, EffectVoiceState& st,
+                    uint32_t sample_rate);
+
+void vinyl_sim_frame(float* lr, uint32_t channels,
+                     const EffectParams& p, EffectVoiceState& st,
+                     uint32_t sample_rate);
+
+void reverb_process_buffer(float* lr_interleaved, uint32_t frames,
+                           const EffectParams& p, GlobalEffectState& st,
+                           uint32_t sample_rate);
+
+void tape_echo_process_buffer(float* lr_interleaved, uint32_t frames,
+                              const EffectParams& p, GlobalEffectState& st,
+                              uint32_t sample_rate);
+
+void chorus_process_buffer(float* lr_interleaved, uint32_t frames,
+                           const EffectParams& p, GlobalEffectState& st,
+                           uint32_t sample_rate);
+
+void flanger_process_buffer(float* lr_interleaved, uint32_t frames,
+                            const EffectParams& p, GlobalEffectState& st,
+                            uint32_t sample_rate);
+
+void phaser_process_buffer(float* lr_interleaved, uint32_t frames,
+                           const EffectParams& p, GlobalEffectState& st,
+                           uint32_t sample_rate);
+
+void tremolo_pan_process_buffer(float* lr_interleaved, uint32_t frames,
+                                const EffectParams& p, GlobalEffectState& st,
+                                uint32_t sample_rate);
 
 float pitch_playback_rate(const EffectParams& p);
 float pitch_feedback_amount(const EffectParams& p);

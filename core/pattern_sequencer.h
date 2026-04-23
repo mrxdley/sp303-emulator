@@ -8,6 +8,7 @@ namespace sp303 {
 struct PatternEvent {
     int tick = 0;
     int sample_pad = 0;
+    int velocity = 127;
 };
 
 enum PatternQuantize {
@@ -50,7 +51,7 @@ struct PatternSequencer {
     int last_quarter_index = -1;
     uint32_t erase_pad_mask = 0;
 
-    std::vector<int> pending_triggers;
+    std::vector<PatternEvent> pending_triggers;
     std::vector<int> pending_metronome;
 };
 
@@ -88,9 +89,9 @@ void pattern_start_playback(PatternSequencer* seq, int slot);
 void pattern_stop(PatternSequencer* seq);
 void pattern_start_record(PatternSequencer* seq, int slot);
 void pattern_stop_record(PatternSequencer* seq);
-void pattern_record_pad_hit(PatternSequencer* seq, int sample_pad);
+void pattern_record_pad_hit(PatternSequencer* seq, int sample_pad, int velocity);
 void pattern_advance(PatternSequencer* seq, uint32_t samples_elapsed, uint32_t sample_rate);
-int  pattern_consume_trigger(PatternSequencer* seq);
+bool pattern_consume_trigger(PatternSequencer* seq, PatternEvent* out);
 int  pattern_consume_metronome(PatternSequencer* seq);
 
 } // namespace sp303

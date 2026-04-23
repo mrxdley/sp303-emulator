@@ -12,6 +12,7 @@
 namespace sp303 {
 
 static constexpr int METRONOME_MS = 35;
+static constexpr float BUS_EFFECT_MAX_SEC = 2.0f;
 
 static inline float read_sample_linear(const Sample& s, float frame_pos, uint32_t channel) {
     const uint32_t ch = std::min(channel, std::max(1u, s.channels) - 1u);
@@ -97,6 +98,13 @@ static int normalize_bpm_local(int bpm) {
     while (bpm < 40) bpm *= 2;
     while (bpm > 200) bpm = (int)std::lround(bpm * 0.5f);
     return std::clamp(bpm, 40, 200);
+}
+
+float audio_velocity_gain_from_midi(int velocity) {
+    const float norm = std::clamp(velocity, 1, 127) / 127.0f;
+    // Attenuation-only curve: full velocity preserves current sample level,
+    // lower velocities only reduce it.
+    return std::pow(norm, 1.5f);
 }
 
 static int derive_sample_bpm_unlocked(const Audio* a, const Sample& s) {
@@ -256,17 +264,17 @@ static void playback_cb(ma_device* dev, void* out_raw, const void*, ma_uint32 fr
                 if (v.use_rendered) {
                     if (src_channels == 2) {
                         uint32_t idx = play_pos * 2;
-                        l = v.rendered_pcm[idx]     * (v.gain * s.level);
-                        r = v.rendered_pcm[idx + 1] * (v.gain * s.level);
+                        l = v.rendered_pcm[idx]     * (v.gain * v.velocity * s.level);
+                        r = v.rendered_pcm[idx + 1] * (v.gain * v.velocity * s.level);
                     } else {
-                        l = r = v.rendered_pcm[play_pos] * (v.gain * s.level);
+                        l = r = v.rendered_pcm[play_pos] * (v.gain * v.velocity * s.level);
                     }
                 } else if (s.channels == 2) {
                     uint32_t idx = play_pos * 2;
-                    l = s.pcm[idx]     * (v.gain * s.level);
-                    r = s.pcm[idx + 1] * (v.gain * s.level);
+                    l = s.pcm[idx]     * (v.gain * v.velocity * s.level);
+                    r = s.pcm[idx + 1] * (v.gain * v.velocity * s.level);
                 } else {
-                    l = r = s.pcm[play_pos] * (v.gain * s.level);
+                    l = r = s.pcm[play_pos] * (v.gain * v.velocity * s.level);
                 }
 
                 if (!v.reverse) {
@@ -284,12 +292,12 @@ static void playback_cb(ma_device* dev, void* out_raw, const void*, ma_uint32 fr
                     const float dry = 1.0f - wet;
 
                     float wet_l = v.use_rendered
-                        ? read_pcm_linear(v.rendered_pcm, src_channels, v.effect_position, 0) * (v.gain * s.level)
-                        : read_sample_linear(s, v.effect_position, 0) * (v.gain * s.level);
+                        ? read_pcm_linear(v.rendered_pcm, src_channels, v.effect_position, 0) * (v.gain * v.velocity * s.level)
+                        : read_sample_linear(s, v.effect_position, 0) * (v.gain * v.velocity * s.level);
                     float wet_r = (src_channels == 2)
                         ? (v.use_rendered
-                            ? read_pcm_linear(v.rendered_pcm, src_channels, v.effect_position, 1) * (v.gain * s.level)
-                            : read_sample_linear(s, v.effect_position, 1) * (v.gain * s.level))
+                            ? read_pcm_linear(v.rendered_pcm, src_channels, v.effect_position, 1) * (v.gain * v.velocity * s.level)
+                            : read_sample_linear(s, v.effect_position, 1) * (v.gain * v.velocity * s.level))
                         : wet_l;
 
                     wet_l += v.fx_state.s1[0] * feedback;
@@ -414,13 +422,6 @@ static void capture_cb(ma_device* dev, void* out_raw, const void* in_raw, ma_uin
     }
     float avg = frames > 0 ? sum / frames : 0.0f;
     a->input_peak.store(peak, std::memory_order_relaxed);
-
-    static int dbg_cap = 0;
-    if (++dbg_cap >= 200) {
-        dbg_cap = 0;
-        std::printf("[CAP] frames=%u peak=%.4f avg=%.4f rec_active=%d\n",
-                    frames, peak, avg, a->rec_active ? 1 : 0);
-    }
 
     std::lock_guard<std::mutex> lock(a->rec_mutex);
     if (!a->rec_active || a->rec_buffer.empty() || a->rec_from_output) return;
@@ -547,7 +548,7 @@ Audio* audio_create(const AudioConfig* cfg) {
 
     // Pre-allocate bus effect buffers (delay ring-buffer + wet-bus scratch)
     {
-        const uint32_t cap = std::max(2048u, (uint32_t)(a->cfg.sample_rate * 0.75f));
+        const uint32_t cap = std::max(2048u, (uint32_t)(a->cfg.sample_rate * BUS_EFFECT_MAX_SEC));
         a->global_fx_state.capacity_frames = cap;
         a->global_fx_state.buf.assign(cap * 2, 0.0f);
         a->fx_wet_buf.assign(a->cfg.buffer_frames * 2, 0.0f);
@@ -681,6 +682,11 @@ int audio_get_pattern_bpm(Audio* a) {
     return std::clamp(a->pattern_bpm.load(std::memory_order_relaxed), 40, 200);
 }
 
+void audio_set_delay_bpm(Audio* a, float bpm) {
+    if (!a) return;
+    a->global_fx_state.bpm = bpm > 0.0f ? bpm : 120.0f;
+}
+
 void audio_trigger_metronome(Audio* a, int level, bool accent) {
     if (!a) return;
     a->metronome_level.store(std::clamp(level, 0, 127), std::memory_order_relaxed);
@@ -715,13 +721,13 @@ int audio_get_sample_playhead(Audio* a, int slot) {
 }
 
 int audio_get_pad_led_hold_frames(Audio* a, int slot, bool reverse) {
-    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return 180;
+    if (!a || slot < 0 || slot >= AUDIO_SLOTS) return 0;
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     const auto& s = a->samples[slot];
-    if (s.pcm.empty()) return 180;
+    if (s.pcm.empty()) return 0;
     const uint32_t playback_frames = effective_playback_frames_unlocked(a, s, reverse);
     const float seconds = playback_frames / (float)std::max(1u, a->cfg.sample_rate);
-    return std::max(180, (int)std::lround(seconds * 60.0f) + 180);
+    return std::max(1, (int)std::lround(seconds * 60.0f));
 }
 
 // ─── Playback ─────────────────────────────────────────────────────────────────
@@ -739,11 +745,12 @@ void audio_note_off(Audio* a, int slot) {
     audio_stop(a, slot);
 }
 
-void audio_trigger_mode(Audio* a, int slot, bool loop, bool gate, bool reverse) {
+void audio_trigger_mode_velocity(Audio* a, int slot, bool loop, bool gate, bool reverse, float velocity) {
     if (!a || slot < 0 || slot >= AUDIO_SLOTS) return;
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     const auto& s = a->samples[slot];
     if (s.pcm.empty()) return;
+    velocity = std::clamp(velocity, 0.0f, 1.0f);
 
     const int bank = slot / 8;
     const int pad = (slot % 8) + 1;
@@ -805,6 +812,7 @@ void audio_trigger_mode(Audio* a, int slot, bool loop, bool gate, bool reverse) 
             v.looping = loop;
             v.reverse = reverse;
             v.gain = 1.0f;
+            v.velocity = velocity;
 
             // Refresh effect routing on every retrigger so toggling a pad's
             // effect assignment takes effect immediately on the next pad hit.
@@ -852,6 +860,7 @@ void audio_trigger_mode(Audio* a, int slot, bool loop, bool gate, bool reverse) 
     target->loop_start   = reverse ? start : (target->use_rendered ? 0u : start);
     target->end_position = reverse ? end : (target->use_rendered ? target->rendered_frames : end);
     target->gain         = 1.0f;
+    target->velocity     = velocity;
     target->looping      = loop;
     target->reverse      = reverse;
     target->active       = true;
@@ -873,8 +882,16 @@ void audio_trigger_mode(Audio* a, int slot, bool loop, bool gate, bool reverse) 
                 reverse ? " [REV]" : "");
 }
 
+void audio_trigger_mode(Audio* a, int slot, bool loop, bool gate, bool reverse) {
+    audio_trigger_mode_velocity(a, slot, loop, gate, reverse, 1.0f);
+}
+
 void audio_trigger(Audio* a, int slot) {
-    audio_trigger_mode(a, slot, false, false, false);
+    audio_trigger_mode_velocity(a, slot, false, false, false, 1.0f);
+}
+
+void audio_trigger_velocity(Audio* a, int slot, float velocity) {
+    audio_trigger_mode_velocity(a, slot, false, false, false, velocity);
 }
 
 void audio_stop(Audio* a, int slot) {
@@ -1069,9 +1086,12 @@ void audio_set_record_from_output(Audio* a, bool enabled) {
 
 void audio_set_effect_routing(Audio* a, int active_btn, int mfx_type, uint32_t pad_mask) {
     if (!a) return;
-    // Detect effect type change — signal the callback to flush the bus ring-buffer
+    // Detect effect/subtype change — signal the callback to flush shared bus state.
     const int prev_btn = a->fx_active_btn.load(std::memory_order_relaxed);
-    if (active_btn != prev_btn) {
+    const int prev_mfx = a->fx_mfx_type.load(std::memory_order_relaxed);
+    const int prev_idx = fx_btn_to_index(prev_btn, prev_mfx);
+    const int next_idx = fx_btn_to_index(active_btn, mfx_type);
+    if (active_btn != prev_btn || mfx_type != prev_mfx || prev_idx != next_idx) {
         a->fx_state_reset_pending.store(true, std::memory_order_release);
     }
     a->fx_active_btn.store(active_btn,  std::memory_order_relaxed);
@@ -1099,10 +1119,10 @@ bool audio_reconfigure(Audio* a, const AudioConfig* cfg) {
 
     // Re-allocate bus effect buffers for the new sample rate / buffer size
     {
-        const uint32_t cap = std::max(2048u, (uint32_t)(a->cfg.sample_rate * 0.75f));
+        const uint32_t cap = std::max(2048u, (uint32_t)(a->cfg.sample_rate * BUS_EFFECT_MAX_SEC));
         a->global_fx_state.capacity_frames = cap;
         a->global_fx_state.buf.assign(cap * 2, 0.0f);
-        a->global_fx_state.write_pos = 0;
+        a->global_fx_state.clear();
         a->fx_wet_buf.assign(a->cfg.buffer_frames * 2, 0.0f);
     }
 

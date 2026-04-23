@@ -41,13 +41,14 @@ static const Color C_KNOB_THUMB    = { 210, 210, 210, 255 };
 static const char* LAYOUT_FILE  = "layout.json";
 static const char* KEYMAP_FILE  = "keymap.json";
 static const char* QUICKSAVE_DIR = "projects/quicksave";
+static const char* WINDOW_FILE  = "window.json";
 
 // ─── Layout structs ───────────────────────────────────────────────────────────
 
 struct BtnPos  { int x, y, w, h; };
 struct IndPos  { int x, y, r;    };
 struct DispPos { int x, y, dw, dh, gap; };
-struct KnobPos { int x, y, len;  };
+struct KnobPos { int x, y, r;    };
 
 struct Layout {
     BtnPos  buttons[sp303::BTN_COUNT];
@@ -133,6 +134,7 @@ static std::unordered_map<int, sp303::ButtonID> write_default_keymap() {
         {"a", "PAD_1"}, {"s", "PAD_2"}, {"d", "PAD_3"}, {"f", "PAD_4"},
         {"z", "PAD_5"}, {"x", "PAD_6"}, {"c", "PAD_7"}, {"v", "PAD_8"},
         {"1", "BANK_A"}, {"2", "BANK_B"}, {"3", "BANK_C"}, {"4", "BANK_D"},
+        {"m",         "MFX"},
         {"space",     "REC"},
         {"enter",     "PATTERN_SELECT"},
         {"backspace", "DEL"},
@@ -150,9 +152,18 @@ static std::unordered_map<int, sp303::ButtonID> write_default_keymap() {
     return out;
 }
 
+// Bindings that are always guaranteed regardless of keymap.json content.
+static void apply_fixed_bindings(std::unordered_map<int, sp303::ButtonID>& out) {
+    out.emplace(KEY_M, sp303::BTN_MFX);
+}
+
 static std::unordered_map<int, sp303::ButtonID> load_keymap() {
     std::ifstream f(KEYMAP_FILE);
-    if (!f.is_open()) return write_default_keymap();
+    if (!f.is_open()) {
+        auto m = write_default_keymap();
+        apply_fixed_bindings(m);
+        return m;
+    }
     try {
         json j = json::parse(f);
         std::unordered_map<int, sp303::ButtonID> out;
@@ -161,13 +172,41 @@ static std::unordered_map<int, sp303::ButtonID> load_keymap() {
             sp303::ButtonID btn = btn_from_name(v.get<std::string>());
             if (key && btn != (sp303::ButtonID)-1) out[key] = btn;
         }
+        apply_fixed_bindings(out);
         return out;
     } catch (...) {
-        return write_default_keymap();
+        auto m = write_default_keymap();
+        apply_fixed_bindings(m);
+        return m;
     }
 }
 
 // ─── Config screen ────────────────────────────────────────────────────────────
+
+struct WindowPrefs {
+    int w = SW;
+    int h = SH;
+};
+
+static void save_window_prefs(int w, int h) {
+    json j = { {"w", std::max(w, 1)}, {"h", std::max(h, 1)} };
+    std::ofstream f(WINDOW_FILE);
+    f << j.dump(2);
+}
+
+static WindowPrefs load_window_prefs() {
+    std::ifstream f(WINDOW_FILE);
+    if (!f.is_open()) return {};
+    try {
+        json j = json::parse(f);
+        WindowPrefs p;
+        p.w = std::max((int)j.value("w", SW), 1);
+        p.h = std::max((int)j.value("h", SH), 1);
+        return p;
+    } catch (...) {
+        return {};
+    }
+}
 
 static const uint32_t SAMPLE_RATES[] = {44100, 48000, 96000};
 static const uint32_t BUFFER_SIZES[] = {128, 256, 512, 1024, 2048};
@@ -175,15 +214,20 @@ static const int      N_RATES        = 3;
 static const int      N_BUFS         = 5;
 
 static bool draw_config_screen(
-    int& sel_out, int& sel_in, int& sel_rate, int& sel_buf, float& peak_threshold,
+    int screen_w, int screen_h,
+    int& sel_out, int& sel_in, int& sel_rate, int& sel_buf, int& sel_card, float& peak_threshold,
     const std::vector<sp303::AudioDeviceInfo>& out_devs,
     const std::vector<sp303::AudioDeviceInfo>& in_devs,
+    const std::vector<std::string>& card_dirs,
     bool playback_ok, int mx, int my, bool clicked, bool mouse_down,
     float input_peak)
 {
-    DrawRectangle(0, 0, SW, SH, {0, 0, 0, 170});
+    DrawRectangle(0, 0, screen_w, screen_h, {0, 0, 0, 170});
 
-    const int PX = 160, PY = 140, PW = 960, PH = 440;
+    const int PW = std::min(960, screen_w - 80);
+    const int PH = 440;
+    const int PX = (screen_w - PW) / 2;
+    const int PY = std::max(40, (screen_h - PH) / 2);
     DrawRectangle(PX, PY, PW, PH, {22, 22, 22, 255});
     DrawRectangleLines(PX, PY, PW, PH, C_BORDER);
 
@@ -239,7 +283,12 @@ static bool draw_config_screen(
     d = selector(3, "Buffer size:", std::to_string(BUFFER_SIZES[sel_buf]) + " frames");
     if (d) sel_buf = (sel_buf + d + N_BUFS) % N_BUFS;
 
-    const int SRY = PY + 72 + 4 * 72;
+    std::string card_name = card_dirs.empty() ? "(no cards)" : card_dirs[sel_card];
+    d = selector(4, "Card folder:", card_name);
+    if (d && !card_dirs.empty())
+        sel_card = (sel_card + d + (int)card_dirs.size()) % (int)card_dirs.size();
+
+    const int SRY = PY + 72 + 5 * 72;
     const int SLX = PX + 174;
     const int SLW = PW - 230;
     const int SLH = 12;
@@ -259,7 +308,7 @@ static bool draw_config_screen(
         peak_threshold = std::clamp((float)(mx - SLX) / (float)SLW, 0.0f, 1.0f);
     }
 
-    const int METER_Y = PY + 72 + 5 * 72 - 8;
+    const int METER_Y = PY + 72 + 6 * 72 - 8;
     const int METER_X = PX + 24;
     const int METER_W = PW - 48;
     const int METER_H = 24;
@@ -349,7 +398,7 @@ static Layout build_default_layout() {
     place(sp303::BTN_HOLD,       5, 3);
     place(sp303::BTN_EXT_SOURCE, 6, 3);
 
-    const int PW = 96, PH = 90, PG = 10;
+    const int PW = 100, PH = 100, PG = 10;
     const int POY = OY + 4*SY + 10;
     for (int i = 0; i < 4; ++i) {
         BtnPos top = { OX + i*(PW+PG), POY,        PW, PH };
@@ -363,11 +412,11 @@ static Layout build_default_layout() {
     const int DW = 28, DH = 52, DG = 6;
     L.disp = { OX + 7*SX, 30, DW, DH, DG };
 
-    L.peak = { L.disp.x + 3*DW + 2*DG + 26, 30 + DH/2, 10 };
+    L.peak = { L.disp.x + 3*DW + 2*DG + 26, 30 + DH/2, 7 };
 
-    const int KY = 90, KLEN = 160, KSX = 220;
+    const int KY = 100, KR = 26, KSX = 220;
     for (int i = 0; i < sp303::KNOB_COUNT; ++i)
-        L.knobs[i] = { OX + i*KSX, KY, KLEN };
+        L.knobs[i] = { OX + i*KSX, KY, KR };
 
     return L;
 }
@@ -386,7 +435,7 @@ static void save_layout(const Layout& L) {
                      {"dw",L.disp.dw}, {"dh",L.disp.dh}, {"gap",L.disp.gap} };
     for (int i = 0; i < sp303::KNOB_COUNT; ++i) {
         const auto& k = L.knobs[i];
-        j["knobs"][std::to_string(i)] = { {"x",k.x},{"y",k.y},{"len",k.len} };
+        j["knobs"][std::to_string(i)] = { {"x",k.x},{"y",k.y},{"r",k.r} };
     }
     std::ofstream f(LAYOUT_FILE);
     f << j.dump(2);
@@ -405,6 +454,10 @@ static Layout load_layout() {
                 if (j["buttons"].contains(key)) {
                     auto& r = j["buttons"][key];
                     BtnPos p = { r["x"], r["y"], r["w"], r["h"] };
+                    if (i >= sp303::BTN_PAD_1 && i <= sp303::BTN_PAD_8) {
+                        p.w = (int)std::lround((float)p.w / (float)DRAG_GRID) * DRAG_GRID;
+                        p.h = (int)std::lround((float)p.h / (float)DRAG_GRID) * DRAG_GRID;
+                    }
                     L.buttons[i] = p;
                     if (i >= sp303::BTN_PAD_1 && i <= sp303::BTN_PAD_8) {
                         int slot = i - sp303::BTN_PAD_1;
@@ -415,7 +468,7 @@ static Layout load_layout() {
             }
         }
         if (j.contains("peak"))
-            L.peak = { j["peak"]["x"], j["peak"]["y"], j["peak"]["r"] };
+            L.peak = { j["peak"]["x"], j["peak"]["y"], std::clamp((int)j["peak"]["r"], 4, 7) };
         if (j.contains("display")) {
             auto& d = j["display"];
             L.disp = { d["x"], d["y"], d["dw"], d["dh"], d["gap"] };
@@ -425,7 +478,9 @@ static Layout load_layout() {
                 auto key = std::to_string(i);
                 if (j["knobs"].contains(key)) {
                     auto& k = j["knobs"][key];
-                    L.knobs[i] = { k["x"], k["y"], k["len"] };
+                    int r = k.contains("r") ? (int)k["r"] :
+                            (k.contains("len") ? std::clamp((int)k["len"] / 3, 40, 96) : L.knobs[i].r);
+                    L.knobs[i] = { k["x"], k["y"], r };
                 }
             }
         }
@@ -463,7 +518,17 @@ static void draw_display(const DispPos& dp, const sp303::Display& disp) {
 
 // ─── Button drawing ───────────────────────────────────────────────────────────
 
-static void draw_button(const BtnPos& r, const sp303::ButtonDef& def,
+static const char* display_button_label(sp303::ButtonID id, const sp303::ButtonDef& def) {
+    switch (id) {
+        case sp303::BTN_BANK_A: return "A";
+        case sp303::BTN_BANK_B: return "B";
+        case sp303::BTN_BANK_C: return "C";
+        case sp303::BTN_BANK_D: return "D";
+        default: return def.primary;
+    }
+}
+
+static void draw_button(sp303::ButtonID id, const BtnPos& r, const sp303::ButtonDef& def,
                         const sp303::ButtonState& s, bool dragging) {
     Color fill;
     if      ( s.lit &&  s.pressed) fill = C_LIT_PRESSED;
@@ -474,13 +539,14 @@ static void draw_button(const BtnPos& r, const sp303::ButtonDef& def,
     DrawRectangle(r.x, r.y, r.w, r.h, fill);
     DrawRectangleLines(r.x, r.y, r.w, r.h, dragging ? C_DRAG : C_BORDER);
 
+    const char* primary = display_button_label(id, def);
     int fs = 9;
-    int tw = MeasureText(def.primary, fs);
-    while (tw > r.w - 4 && fs > 6) { --fs; tw = MeasureText(def.primary, fs); }
+    int tw = MeasureText(primary, fs);
+    while (tw > r.w - 4 && fs > 6) { --fs; tw = MeasureText(primary, fs); }
 
     bool has_alt = (def.alt1 != nullptr);
     int  ty = r.y + (r.h - fs) / 2 - (has_alt ? 5 : 0);
-    DrawText(def.primary, r.x + (r.w - tw)/2, ty, fs, C_TEXT);
+    DrawText(primary, r.x + (r.w - tw)/2, ty, fs, C_TEXT);
 
     if (has_alt) {
         std::string alt = def.alt1;
@@ -495,27 +561,30 @@ static void draw_button(const BtnPos& r, const sp303::ButtonDef& def,
 // ─── Knob (slider) drawing ────────────────────────────────────────────────────
 
 static void draw_knob(const KnobPos& k, const sp303::KnobDef& def, float value, bool dragging) {
-    const int TH = 10;
-    const int TR = 7;
-    int fill_w = (int)(value * k.len);
-    int cx     = k.x + fill_w;
-    int cy     = k.y + TH / 2;
-
+    const int cx = k.x;
+    const int cy = k.y;
+    const float start_angle = 135.0f;
+    const float end_angle   = 405.0f;
+    const float angle_deg   = start_angle + std::clamp(value, 0.0f, 1.0f) * (end_angle - start_angle);
+    const float angle_rad   = angle_deg * (PI / 180.0f);
+    const int pointer_len   = std::max(8, k.r - 7);
     const int lfs = 9;
-    DrawText(def.primary, k.x, k.y - lfs - 4, lfs, dragging ? C_DRAG : C_TEXT);
+    int primary_w = MeasureText(def.primary, lfs);
+    DrawText(def.primary, cx - primary_w/2, cy - k.r - lfs - 10, lfs, dragging ? C_DRAG : C_TEXT);
     if (def.alt1) {
         std::string alt = def.alt1;
         if (def.alt2) { alt += "/"; alt += def.alt2; }
         int atw = MeasureText(alt.c_str(), 7);
-        DrawText(alt.c_str(), k.x + k.len - atw, k.y - 7 - 4, 7, C_ALT);
+        DrawText(alt.c_str(), cx - atw/2, cy + k.r + 8, 7, C_ALT);
     }
-
-    DrawRectangle(k.x, k.y, k.len, TH, C_KNOB_TRACK);
-    DrawRectangle(k.x, k.y, fill_w, TH, dragging ? C_DRAG : C_KNOB_FILL);
-    DrawRectangleLines(k.x, k.y, k.len, TH, C_BORDER);
-
-    DrawCircle(cx, cy, (float)TR, dragging ? C_DRAG : C_KNOB_THUMB);
-    DrawCircleLines(cx, cy, (float)TR, C_BORDER);
+    DrawCircle(cx, cy, (float)(k.r + 2), C_BORDER);
+    DrawCircle(cx, cy, (float)k.r, C_KNOB_TRACK);
+    DrawCircle(cx, cy, (float)(k.r - 5), dragging ? C_DRAG : C_KNOB_FILL);
+    DrawCircle(cx, cy, (float)(k.r - 11), C_BG);
+    int px = cx + (int)std::lround(std::cos(angle_rad) * pointer_len);
+    int py = cy + (int)std::lround(std::sin(angle_rad) * pointer_len);
+    DrawLineEx({(float)cx, (float)cy}, {(float)px, (float)py}, 3.0f, C_KNOB_THUMB);
+    DrawCircle(cx, cy, 4.0f, C_KNOB_THUMB);
 }
 
 // ─── PEAK indicator ───────────────────────────────────────────────────────────
@@ -525,13 +594,6 @@ static void draw_peak(const IndPos& p, bool lit) {
     DrawCircle(p.x, p.y, (float)p.r,       lit ? C_PEAK_ON : C_PEAK_OFF);
     const int fs = 8;
     DrawText("PEAK", p.x - MeasureText("PEAK", fs)/2, p.y + p.r + 3, fs, C_ALT);
-}
-
-static void draw_stereo_activity(const IndPos& p, bool lit) {
-    DrawCircle(p.x, p.y, (float)(p.r + 1), C_BORDER);
-    DrawCircle(p.x, p.y, (float)p.r,       lit ? C_PEAK_ON : C_PEAK_OFF);
-    const int fs = 8;
-    DrawText("ST", p.x - MeasureText("ST", fs)/2, p.y + p.r + 3, fs, C_ALT);
 }
 
 // ─── Hit testing ──────────────────────────────────────────────────────────────
@@ -548,7 +610,9 @@ static bool hit_disp(int mx, int my, const DispPos& dp) {
     return mx >= dp.x-6 && mx < dp.x-6+w && my >= dp.y-6 && my < dp.y-6+dp.dh+12;
 }
 static bool hit_knob(int mx, int my, const KnobPos& k) {
-    return mx >= k.x-6 && mx <= k.x+k.len+6 && my >= k.y-10 && my <= k.y+20;
+    int dx = mx - k.x;
+    int dy = my - k.y;
+    return dx*dx + dy*dy <= (k.r + 10) * (k.r + 10);
 }
 
 static int snap_to_grid(int v) {
@@ -570,6 +634,32 @@ struct Drag {
     int offy   = 0;
 };
 
+static void mirror_pad_button(Layout& layout, int id) {
+    if (id < sp303::BTN_PAD_1 || id > sp303::BTN_PAD_8) return;
+    int slot = id - sp303::BTN_PAD_1;
+    BtnPos p = layout.buttons[id];
+    for (int b = 1; b < 4; ++b)
+        layout.buttons[sp303::BTN_PAD_1 + b*8 + slot] = p;
+}
+
+static void resize_button_vertical(Layout& layout, int id, int delta) {
+    if (id < 0 || id >= sp303::BTN_COUNT) return;
+    BtnPos& b = layout.buttons[id];
+    int new_h = std::clamp(b.h + delta, 22, 220);
+    b.y -= (new_h - b.h) / 2;
+    b.h = new_h;
+    mirror_pad_button(layout, id);
+}
+
+static void resize_button_horizontal(Layout& layout, int id, int delta) {
+    if (id < 0 || id >= sp303::BTN_COUNT) return;
+    BtnPos& b = layout.buttons[id];
+    int new_w = std::clamp(b.w + delta, 28, 260);
+    b.x -= (new_w - b.w) / 2;
+    b.w = new_w;
+    mirror_pad_button(layout, id);
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 int main(void) {
@@ -579,23 +669,37 @@ int main(void) {
     bool config_open = false;
 
     sp303::Device* dev    = sp303::create();
+    renderer_controller_mount_card(&controller, dev);
     Layout         layout = load_layout();
     Drag           drag;
     int            pressed_btn = -1;
     int            active_knob = -1;
+    int            knob_drag_start_y = 0;
+    float          knob_drag_start_value = 0.0f;
 
     auto keymap = load_keymap();
     std::unordered_map<int, sp303::ButtonID> key_held;
+    WindowPrefs window_prefs = load_window_prefs();
+    int last_saved_w = window_prefs.w;
+    int last_saved_h = window_prefs.h;
 
-    SetConfigFlags(FLAG_MSAA_4X_HINT);
-    InitWindow(SW, SH, "SP-303");
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    InitWindow(window_prefs.w, window_prefs.h, "SP-303");
     SetTargetFPS(60);
 
     while (!WindowShouldClose()) {
+        int screen_w = GetScreenWidth();
+        int screen_h = GetScreenHeight();
+        if (screen_w != last_saved_w || screen_h != last_saved_h) {
+            save_window_prefs(screen_w, screen_h);
+            last_saved_w = screen_w;
+            last_saved_h = screen_h;
+        }
         Vector2 mouse = GetMousePosition();
         int  mx    = (int)mouse.x;
         int  my    = (int)mouse.y;
         bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+        bool ctrl  = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
 
         auto release_live_inputs = [&]() {
             if (pressed_btn >= 0) {
@@ -631,6 +735,7 @@ int main(void) {
             sp303::Device* loaded_dev = sp303::create();
             ProjectIoResult res = project_load(QUICKSAVE_DIR, loaded_dev, controller.audio, controller.audio_cfg);
             if (res.ok) {
+                renderer_controller_mount_card(&controller, loaded_dev);
                 sp303::destroy(dev);
                 dev = loaded_dev;
             } else {
@@ -661,8 +766,8 @@ int main(void) {
                 for (int i = 0; i < sp303::KNOB_COUNT; ++i) {
                     if (hit_knob(mx, my, layout.knobs[i])) {
                         active_knob = i;
-                        float v = std::clamp((float)(mx - layout.knobs[i].x) / layout.knobs[i].len, 0.0f, 1.0f);
-                        sp303::knob_set(dev, (sp303::KnobID)i, v);
+                        knob_drag_start_y = my;
+                        knob_drag_start_value = sp303::get_state(dev).knobs[i].value;
                         break;
                     }
                 }
@@ -746,31 +851,49 @@ int main(void) {
             active_knob = -1;
         }
 
+        if (shift && !config_open) {
+            float wheel = GetMouseWheelMove();
+            if (wheel != 0.0f) {
+                int delta = (wheel > 0.0f) ? DRAG_GRID : -DRAG_GRID;
+                for (int i = 0; i < sp303::BTN_COUNT; ++i) {
+                    if (i > sp303::BTN_PAD_8 && i <= sp303::BTN_PAD_32) continue;
+                    if (hit_btn(mx, my, layout.buttons[i])) {
+                        if (ctrl) resize_button_horizontal(layout, i, delta);
+                        else resize_button_vertical(layout, i, delta);
+                        save_layout(layout);
+                        break;
+                    }
+                }
+            }
+        }
+
         if (drag.target != DRAG_NONE) {
-            int nx = snap_to_grid(mx - drag.offx);
-            int ny = snap_to_grid(my - drag.offy);
             int t  = drag.target;
             if (t < sp303::BTN_COUNT) {
+                int nx = snap_to_grid(mx - drag.offx);
+                int ny = snap_to_grid(my - drag.offy);
                 layout.buttons[t].x = nx;
                 layout.buttons[t].y = ny;
-                if (t >= sp303::BTN_PAD_1 && t <= sp303::BTN_PAD_8) {
-                    int slot = t - sp303::BTN_PAD_1;
-                    BtnPos p = layout.buttons[t];
-                    for (int b = 1; b < 4; ++b)
-                        layout.buttons[sp303::BTN_PAD_1 + b*8 + slot] = p;
-                }
+                mirror_pad_button(layout, t);
             } else if (t == DRAG_PEAK) {
+                int nx = snap_to_grid(mx - drag.offx);
+                int ny = snap_to_grid(my - drag.offy);
                 layout.peak.x = nx; layout.peak.y = ny;
             } else if (t == DRAG_DISP) {
+                int nx = snap_to_grid(mx - drag.offx);
+                int ny = snap_to_grid(my - drag.offy);
                 layout.disp.x = nx; layout.disp.y = ny;
             } else if (t >= DRAG_KNOB_0 && t < DRAG_KNOB_0 + sp303::KNOB_COUNT) {
+                int nx = snap_to_grid(mx - drag.offx);
+                int ny = snap_to_grid(my - drag.offy);
                 layout.knobs[t - DRAG_KNOB_0].x = nx;
                 layout.knobs[t - DRAG_KNOB_0].y = ny;
             }
         }
 
         if (active_knob >= 0 && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-            float v = std::clamp((float)(mx - layout.knobs[active_knob].x) / layout.knobs[active_knob].len, 0.0f, 1.0f);
+            float delta = (float)(knob_drag_start_y - my) / 160.0f;
+            float v = std::clamp(knob_drag_start_value + delta, 0.0f, 1.0f);
             sp303::knob_set(dev, (sp303::KnobID)active_knob, v);
         }
 
@@ -863,7 +986,7 @@ int main(void) {
 
         for (int i = 0; i < sp303::BTN_COUNT; ++i) {
             if (i >= sp303::BTN_PAD_1 && i <= sp303::BTN_PAD_32) continue;
-            draw_button(layout.buttons[i], sp303::BUTTON_DEFS[i],
+            draw_button((sp303::ButtonID)i, layout.buttons[i], sp303::BUTTON_DEFS[i],
                         state.buttons[i], drag.target == i);
         }
 
@@ -871,7 +994,7 @@ int main(void) {
         for (int i = 0; i < 8; ++i) {
             int pad_id    = sp303::BTN_PAD_1 + bank_off + i;
             int layout_id = sp303::BTN_PAD_1 + i;
-            draw_button(layout.buttons[layout_id], sp303::BUTTON_DEFS[pad_id],
+            draw_button((sp303::ButtonID)pad_id, layout.buttons[layout_id], sp303::BUTTON_DEFS[pad_id],
                         state.buttons[pad_id], drag.target == layout_id);
         }
 
@@ -881,23 +1004,27 @@ int main(void) {
 
         draw_display(layout.disp, state.display);
         draw_peak(layout.peak, state.indicators[sp303::IND_PEAK].lit);
-        IndPos stereo_pos = { layout.peak.x + 36, layout.peak.y, layout.peak.r };
-        draw_stereo_activity(stereo_pos, controller.stereo_activity_lit);
 
         if (!config_open && shift)
-            DrawText("SHIFT + drag: reposition  |  release: save", 10, SH - 18, 9, C_ALT);
+            DrawText("SHIFT + drag: move  |  SHIFT + wheel on button: resize height  |  SHIFT + CTRL + wheel on button: resize width", 10, screen_h - 18, 9, C_ALT);
         if (!config_open)
-            DrawText("[F5] quick-save  [F9] quick-load  [TAB] audio config", SW - 330, SH - 18, 9, C_ALT);
+            DrawText("[F5] quick-save  [F9] quick-load  [TAB] audio config", screen_w - 330, screen_h - 18, 9, C_ALT);
 
         if (config_open) {
             bool apply = draw_config_screen(
-                controller.sel_out, controller.sel_in, controller.sel_rate, controller.sel_buf, controller.peak_threshold,
-                controller.out_devs, controller.in_devs, controller.playback_ok,
+                screen_w, screen_h,
+                controller.sel_out, controller.sel_in, controller.sel_rate, controller.sel_buf, controller.sel_card, controller.peak_threshold,
+                controller.out_devs, controller.in_devs, controller.card_dirs, controller.playback_ok,
                 mx, my, IsMouseButtonPressed(MOUSE_BUTTON_LEFT), IsMouseButtonDown(MOUSE_BUTTON_LEFT),
                 controller.config_input_peak);
 
             if (apply) {
+                if (!controller.card_dirs.empty()) {
+                    controller.card_path = controller.card_dirs[controller.sel_card];
+                }
                 renderer_controller_apply_audio_config(&controller);
+                renderer_controller_refresh_cards(&controller);
+                renderer_controller_mount_card(&controller, dev);
             }
         }
 

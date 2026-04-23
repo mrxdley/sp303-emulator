@@ -10,6 +10,8 @@ include(FetchContent)
 
 add_library(sp303
     core/sp303.cpp
+    core/sp303_card.cpp
+    core/sp303_state.cpp
     core/pattern_sequencer.cpp
     core/memory_card.cpp)
 target_include_directories(sp303 PUBLIC core PRIVATE core)
@@ -68,7 +70,15 @@ add_library(sp303_audio
     audio/effect.cpp
     audio/effects/filter_drive.cpp
     audio/effects/pitch.cpp
-    audio/effects/delay.cpp)
+    audio/effects/delay.cpp
+    audio/effects/isolator.cpp
+    audio/effects/vinyl_sim.cpp
+    audio/effects/reverb.cpp
+    audio/effects/tape_echo.cpp
+    audio/effects/chorus.cpp
+    audio/effects/flanger.cpp
+    audio/effects/phaser.cpp
+    audio/effects/tremolo_pan.cpp)
 target_include_directories(sp303_audio PUBLIC audio PRIVATE core)
 target_link_libraries(sp303_audio PRIVATE miniaudio_iface)
 
@@ -87,6 +97,7 @@ endif()
 add_executable(sp303_renderer
     renderer/main.cpp
     renderer/controller.cpp
+    renderer/card_io.cpp
     renderer/project_io.cpp)
 target_link_libraries(sp303_renderer PRIVATE
     sp303 sp303_audio raylib nlohmann_json::nlohmann_json)
