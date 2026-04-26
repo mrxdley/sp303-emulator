@@ -177,6 +177,8 @@ CardIoResult card_save(const std::filesystem::path& card_dir,
             {"gate", pad.gate_mode},
             {"reverse", pad.reverse_mode},
             {"has_effect", pad.has_effect},
+            {"recorded_stereo", pad.recorded_stereo},
+            {"recorded_quality", pad.recorded_quality},
             {"bpm_adjust", 0},
             {"time_mode", 0},
             {"time_target_bpm", -1},
@@ -236,14 +238,16 @@ CardIoResult card_save(const std::filesystem::path& card_dir,
         for (int i = 0; i < 16; ++i) {
             sp303::PadProjectState state{};
             sp303::get_memory_card_backup_sample_state(dev, backup_slot, i, &state);
-            json js{
-                {"index", i},
-                {"has_sample", state.has_sample},
-                {"loop", state.loop_mode},
-                {"gate", state.gate_mode},
-                {"reverse", state.reverse_mode},
-                {"has_effect", state.has_effect},
-            };
+                    json js{
+                        {"index", i},
+                        {"has_sample", state.has_sample},
+                        {"loop", state.loop_mode},
+                        {"gate", state.gate_mode},
+                        {"reverse", state.reverse_mode},
+                        {"has_effect", state.has_effect},
+                        {"recorded_stereo", state.recorded_stereo},
+                        {"recorded_quality", state.recorded_quality},
+                    };
             if (state.has_sample) {
                 std::vector<float> pcm;
                 uint32_t channels = 1, frames = 0;
@@ -358,6 +362,10 @@ CardIoResult card_load(const std::filesystem::path& card_dir,
             state.gate_mode = jpad.value("gate", false);
             state.reverse_mode = jpad.value("reverse", false);
             state.has_effect = jpad.value("has_effect", false);
+            state.recorded_stereo = jpad.value("recorded_stereo", jpad.value("channels", 1) > 1);
+            state.recorded_quality = std::clamp(jpad.value("recorded_quality", (int)sp303::SAMPLE_QUALITY_STANDARD),
+                                                (int)sp303::SAMPLE_QUALITY_STANDARD,
+                                                (int)sp303::SAMPLE_QUALITY_LOFI);
             if (state.has_sample) {
                 std::vector<float> pcm;
                 uint32_t channels = 1, wav_rate = card_rate;
@@ -416,6 +424,10 @@ CardIoResult card_load(const std::filesystem::path& card_dir,
                     state.gate_mode = js.value("gate", false);
                     state.reverse_mode = js.value("reverse", false);
                     state.has_effect = js.value("has_effect", false);
+                    state.recorded_stereo = js.value("recorded_stereo", js.value("channels", 1) > 1);
+                    state.recorded_quality = std::clamp(js.value("recorded_quality", (int)sp303::SAMPLE_QUALITY_STANDARD),
+                                                        (int)sp303::SAMPLE_QUALITY_STANDARD,
+                                                        (int)sp303::SAMPLE_QUALITY_LOFI);
                     sp303::set_memory_card_backup_sample_state(dev, backup_slot, index, state);
                     if (state.has_sample) {
                         std::vector<float> pcm;

@@ -128,6 +128,7 @@ audio/effects/
 - Check SP-Forums/manual behavior for `LONG/LO-FI` pressed during recording and across other states, then align state-machine behavior.
 - MARK gate-playback logic still needs manual verification and implementation review.
 - Known UI issue: when a pad is pressed while `MARK` is held, pad-lit feedback is not currently correct.
+- Truncate (`trC`) workflow still needs a pad-lighting review so the visual feedback matches the intended operation.
 
 stub velocity for MIDI input later
 there is innacuracies in how vinyl sim is implemented -> gain on CMP

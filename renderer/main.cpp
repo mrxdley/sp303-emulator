@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <vector>
 #include <cmath>
+#include <queue>
+#include <filesystem>
 
 using json = nlohmann::json;
 
@@ -16,7 +18,7 @@ using json = nlohmann::json;
 
 static const int SW = 1280;
 static const int SH =  780;
-static const int DRAG_GRID = 10;
+static const int DRAG_GRID = 5;
 
 // ─── Colors ───────────────────────────────────────────────────────────────────
 
@@ -42,6 +44,17 @@ static const char* LAYOUT_FILE  = "layout.json";
 static const char* KEYMAP_FILE  = "keymap.json";
 static const char* QUICKSAVE_DIR = "projects/quicksave";
 static const char* WINDOW_FILE  = "window.json";
+static const char* BACKGROUND_CANDIDATES[] = {
+    "background.png",
+    "../background.png",
+    "../../background.png",
+};
+static const char* KNOB_CANDIDATES[] = {
+    "knob.png",
+    "../knob.png",
+    "../../knob.png",
+};
+static const bool ENABLE_KNOB_SPRITE = false;
 
 // ─── Layout structs ───────────────────────────────────────────────────────────
 
@@ -186,10 +199,299 @@ static std::unordered_map<int, sp303::ButtonID> load_keymap() {
 struct WindowPrefs {
     int w = SW;
     int h = SH;
+    bool show_hitboxes = true;
 };
 
-static void save_window_prefs(int w, int h) {
-    json j = { {"w", std::max(w, 1)}, {"h", std::max(h, 1)} };
+struct BackgroundAsset {
+    Texture2D texture{};
+    Image image{};
+    std::string path;
+    std::string cache_key;
+    bool loaded = false;
+};
+
+struct KnobSpriteAsset {
+    Texture2D texture{};
+    bool loaded = false;
+};
+
+struct OverlayCacheEntry {
+    BtnPos rect{0, 0, 0, 0};
+    Texture2D pressed{};
+    Texture2D lit{};
+    Texture2D litpressed{};
+    bool valid = false;
+};
+
+enum OverlayState {
+    OVERLAY_PRESSED = 0,
+    OVERLAY_LIT = 1,
+    OVERLAY_LITPRESSED = 2,
+};
+
+static BackgroundAsset load_background_asset() {
+    for (const char* path : BACKGROUND_CANDIDATES) {
+        if (!FileExists(path)) continue;
+        Image img = LoadImage(path);
+        if (!img.data) continue;
+        Texture2D tex = LoadTextureFromImage(img);
+        if (tex.id != 0) {
+            std::string cache_key = "default";
+            try {
+                auto stamp = std::filesystem::last_write_time(path).time_since_epoch().count();
+                cache_key = std::to_string(img.width) + "x" + std::to_string(img.height) + "_" + std::to_string(stamp);
+            } catch (...) {}
+            return { tex, img, path, cache_key, true };
+        }
+        UnloadImage(img);
+    }
+    return {};
+}
+
+static KnobSpriteAsset load_knob_sprite_asset() {
+    if (!ENABLE_KNOB_SPRITE) return {};
+    for (const char* path : KNOB_CANDIDATES) {
+        if (!FileExists(path)) continue;
+        Image img = LoadImage(path);
+        if (!img.data) continue;
+        ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+        Texture2D tex = LoadTextureFromImage(img);
+        UnloadImage(img);
+        if (tex.id != 0) return { tex, true };
+    }
+    return {};
+}
+
+static int background_width(const BackgroundAsset& bg) {
+    return bg.loaded ? bg.texture.width : SW;
+}
+
+static int background_height(const BackgroundAsset& bg) {
+    return bg.loaded ? bg.texture.height : SH;
+}
+
+static bool same_btn_rect(const BtnPos& a, const BtnPos& b) {
+    return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+}
+
+static bool is_exact_blue_seed(Color c) {
+    return c.r == 0x87 && c.g == 0xb4 && c.b == 0xcd;
+}
+
+static bool is_exact_gray_seed(Color c) {
+    return c.r == 0xbc && c.g == 0xc5 && c.b == 0xce;
+}
+
+static bool is_seed_color(Color c) {
+    return is_exact_blue_seed(c) || is_exact_gray_seed(c);
+}
+
+static bool is_blue_family(Color c) {
+    if (c.a == 0) return false;
+    if (c.r == 0 && c.g == 0 && c.b == 0) return false;
+    if (c.b < 18) return false;
+    if (c.g < c.r - 20) return false;
+    return c.b >= c.g - 24;
+}
+
+static bool is_gray_family(Color c) {
+    if (c.a == 0) return false;
+    if (c.r == 0 && c.g == 0 && c.b == 0) return false;
+    int hi = std::max({(int)c.r, (int)c.g, (int)c.b});
+    int lo = std::min({(int)c.r, (int)c.g, (int)c.b});
+    return (hi - lo) <= 44;
+}
+
+static bool is_fill_family(Color c) {
+    return is_blue_family(c) || is_gray_family(c);
+}
+
+static std::string hitbox_cache_base(const BackgroundAsset& bg, const BtnPos& rect) {
+    std::string dir = "hitbox_cache/" + bg.cache_key;
+    return dir + "/" + std::to_string(rect.x) + "_" + std::to_string(rect.y) + "_" +
+           std::to_string(rect.w) + "_" + std::to_string(rect.h);
+}
+
+static void flood_fill_mask_from_hitbox(Image& mask, const BackgroundAsset& bg, const BtnPos& rect) {
+    const int w = std::max(bg.image.width, 1);
+    const int h = std::max(bg.image.height, 1);
+    std::vector<unsigned char> visited((size_t)w * (size_t)h, 0);
+    std::queue<std::pair<int, int>> q;
+
+    const int rx0 = std::max(rect.x, 0);
+    const int ry0 = std::max(rect.y, 0);
+    const int rx1 = std::min(rect.x + rect.w, bg.image.width);
+    const int ry1 = std::min(rect.y + rect.h, bg.image.height);
+
+    for (int y = ry0; y < ry1; ++y) {
+        for (int x = rx0; x < rx1; ++x) {
+            Color c = GetImageColor(bg.image, x, y);
+            if (!is_seed_color(c)) continue;
+            size_t idx = (size_t)y * (size_t)w + (size_t)x;
+            if (visited[idx]) continue;
+            visited[idx] = 1;
+            q.push({x, y});
+
+            while (!q.empty()) {
+                auto [cx, cy] = q.front();
+                q.pop();
+                Color cc = GetImageColor(bg.image, cx, cy);
+                if (!is_fill_family(cc)) continue;
+
+                ImageDrawPixel(&mask, cx, cy, WHITE);
+
+                static const int DX[8] = {1, -1, 0, 0, 1, 1, -1, -1};
+                static const int DY[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+                for (int i = 0; i < 8; ++i) {
+                    int nx = cx + DX[i];
+                    int ny = cy + DY[i];
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                    size_t nidx = (size_t)ny * (size_t)w + (size_t)nx;
+                    if (visited[nidx]) continue;
+                    Color nc = GetImageColor(bg.image, nx, ny);
+                    if (!is_fill_family(nc)) continue;
+                    visited[nidx] = 1;
+                    q.push({nx, ny});
+                }
+            }
+        }
+    }
+}
+
+static std::string overlay_state_suffix(OverlayState state) {
+    switch (state) {
+        case OVERLAY_PRESSED: return "_pressed.png";
+        case OVERLAY_LIT: return "_lit.png";
+        case OVERLAY_LITPRESSED: return "_litpressed.png";
+    }
+    return "_pressed.png";
+}
+
+static Color tint_lit(Color c) {
+    if (c.r == 0 && c.g == 0 && c.b == 0) return c;
+    Color out{};
+    out.r = (unsigned char)std::clamp((int)std::lround(c.r * 0.45f + 175.0f * 0.40f), 0, 255);
+    out.g = (unsigned char)std::clamp((int)std::lround(c.g * 0.45f + 18.0f * 0.10f), 0, 255);
+    out.b = (unsigned char)std::clamp((int)std::lround(c.b * 0.45f + 18.0f * 0.10f), 0, 255);
+    out.a = 255;
+    return out;
+}
+
+static Color tint_litpressed(Color c) {
+    if (c.r == 0 && c.g == 0 && c.b == 0) return c;
+    Color lit = tint_lit(c);
+    Color out{};
+    out.r = (unsigned char)std::clamp((int)std::lround(lit.r * 0.62f), 0, 255);
+    out.g = (unsigned char)std::clamp((int)std::lround(lit.g * 0.62f), 0, 255);
+    out.b = (unsigned char)std::clamp((int)std::lround(lit.b * 0.62f), 0, 255);
+    out.a = 255;
+    return out;
+}
+
+static Image build_overlay_image_from_mask(const Image& mask, const BackgroundAsset& bg, OverlayState state) {
+    Image overlay = GenImageColor(bg.image.width, bg.image.height, BLANK);
+    for (int y = 0; y < bg.image.height; ++y) {
+        for (int x = 0; x < bg.image.width; ++x) {
+            Color m = GetImageColor(mask, x, y);
+            if (m.a == 0) continue;
+            Color src = GetImageColor(bg.image, x, y);
+            Color out = src;
+            if (state == OVERLAY_PRESSED) {
+                out = {
+                    (unsigned char)(src.r / 2),
+                    (unsigned char)(src.g / 2),
+                    (unsigned char)(src.b / 2),
+                    255
+                };
+            } else if (state == OVERLAY_LIT) {
+                out = tint_lit(src);
+            } else if (state == OVERLAY_LITPRESSED) {
+                out = tint_litpressed(src);
+            }
+            ImageDrawPixel(&overlay, x, y, out);
+        }
+    }
+    return overlay;
+}
+
+static Texture2D load_or_build_hitbox_overlay_texture(const BackgroundAsset& bg, const BtnPos& rect, OverlayState state, const Image& mask) {
+    std::string cache_file = hitbox_cache_base(bg, rect) + overlay_state_suffix(state);
+    if (FileExists(cache_file.c_str())) {
+        Image cached = LoadImage(cache_file.c_str());
+        if (cached.data) {
+            Texture2D tex = LoadTextureFromImage(cached);
+            UnloadImage(cached);
+            if (tex.id != 0) return tex;
+        }
+    }
+
+    try {
+        std::filesystem::create_directories(std::filesystem::path(cache_file).parent_path());
+    } catch (...) {
+    }
+    Image overlay = build_overlay_image_from_mask(mask, bg, state);
+    ExportImage(overlay, cache_file.c_str());
+    Texture2D tex = LoadTextureFromImage(overlay);
+    UnloadImage(overlay);
+    return tex;
+}
+
+static void build_hitbox_overlay_entry(OverlayCacheEntry& entry, const BackgroundAsset& bg, const BtnPos& rect) {
+    if (entry.valid && same_btn_rect(entry.rect, rect)) return;
+    if (entry.valid) {
+        if (entry.pressed.id != 0) UnloadTexture(entry.pressed);
+        if (entry.lit.id != 0) UnloadTexture(entry.lit);
+        if (entry.litpressed.id != 0) UnloadTexture(entry.litpressed);
+    }
+    entry.rect = rect;
+    Image mask = GenImageColor(bg.image.width, bg.image.height, BLANK);
+    flood_fill_mask_from_hitbox(mask, bg, rect);
+    entry.pressed = load_or_build_hitbox_overlay_texture(bg, rect, OVERLAY_PRESSED, mask);
+    entry.lit = load_or_build_hitbox_overlay_texture(bg, rect, OVERLAY_LIT, mask);
+    entry.litpressed = load_or_build_hitbox_overlay_texture(bg, rect, OVERLAY_LITPRESSED, mask);
+    UnloadImage(mask);
+    entry.valid = (entry.pressed.id != 0 || entry.lit.id != 0 || entry.litpressed.id != 0);
+}
+
+static Texture2D get_hitbox_overlay_texture(OverlayCacheEntry& entry, const BackgroundAsset& bg, const BtnPos& rect, OverlayState state) {
+    build_hitbox_overlay_entry(entry, bg, rect);
+    if (state == OVERLAY_LIT) return entry.lit;
+    if (state == OVERLAY_LITPRESSED) return entry.litpressed;
+    return entry.pressed;
+}
+
+static void unload_hitbox_overlay_cache(std::vector<OverlayCacheEntry>& cache) {
+    for (auto& entry : cache) {
+        if (entry.valid && entry.pressed.id != 0) UnloadTexture(entry.pressed);
+        if (entry.valid && entry.lit.id != 0) UnloadTexture(entry.lit);
+        if (entry.valid && entry.litpressed.id != 0) UnloadTexture(entry.litpressed);
+        entry.valid = false;
+        entry.pressed = {};
+        entry.lit = {};
+        entry.litpressed = {};
+    }
+}
+
+static void prebuild_hitbox_overlay_cache(std::vector<OverlayCacheEntry>& cache, const BackgroundAsset& bg, const Layout& layout) {
+    if (!bg.loaded) return;
+    for (int i = 0; i < sp303::BTN_COUNT; ++i) {
+        if (i >= sp303::BTN_PAD_1 && i <= sp303::BTN_PAD_32) continue;
+        if (i < 0 || i >= (int)cache.size()) continue;
+        build_hitbox_overlay_entry(cache[i], bg, layout.buttons[i]);
+    }
+    for (int i = 0; i < 8; ++i) {
+        int cache_id = sp303::BTN_PAD_1 + i;
+        if (cache_id < 0 || cache_id >= (int)cache.size()) continue;
+        build_hitbox_overlay_entry(cache[cache_id], bg, layout.buttons[cache_id]);
+    }
+}
+
+static void save_window_prefs(int w, int h, bool show_hitboxes) {
+    json j = {
+        {"w", std::max(w, 1)},
+        {"h", std::max(h, 1)},
+        {"show_hitboxes", show_hitboxes}
+    };
     std::ofstream f(WINDOW_FILE);
     f << j.dump(2);
 }
@@ -202,6 +504,7 @@ static WindowPrefs load_window_prefs() {
         WindowPrefs p;
         p.w = std::max((int)j.value("w", SW), 1);
         p.h = std::max((int)j.value("h", SH), 1);
+        p.show_hitboxes = (bool)j.value("show_hitboxes", true);
         return p;
     } catch (...) {
         return {};
@@ -220,12 +523,12 @@ static bool draw_config_screen(
     const std::vector<sp303::AudioDeviceInfo>& in_devs,
     const std::vector<std::string>& card_dirs,
     bool playback_ok, int mx, int my, bool clicked, bool mouse_down,
-    float input_peak)
+    float input_peak, bool& show_hitboxes)
 {
     DrawRectangle(0, 0, screen_w, screen_h, {0, 0, 0, 170});
 
     const int PW = std::min(960, screen_w - 80);
-    const int PH = 440;
+    const int PH = 520;
     const int PX = (screen_w - PW) / 2;
     const int PY = std::max(40, (screen_h - PH) / 2);
     DrawRectangle(PX, PY, PW, PH, {22, 22, 22, 255});
@@ -288,7 +591,21 @@ static bool draw_config_screen(
     if (d && !card_dirs.empty())
         sel_card = (sel_card + d + (int)card_dirs.size()) % (int)card_dirs.size();
 
-    const int SRY = PY + 72 + 5 * 72;
+    const int TOGGLE_Y = PY + 72 + 5 * 72;
+    const int CBX = PX + 174;
+    const int CBY = TOGGLE_Y + 3;
+    DrawText("Show hitboxes:", PX + 24, TOGGLE_Y - 1, 10, C_ALT);
+    DrawRectangle(CBX, CBY, 22, 22, C_UNLIT);
+    DrawRectangleLines(CBX, CBY, 22, 22, C_BORDER);
+    if (show_hitboxes) {
+        DrawLine(CBX + 4, CBY + 11, CBX + 9, CBY + 16, C_TEXT);
+        DrawLine(CBX + 9, CBY + 16, CBX + 18, CBY + 5, C_TEXT);
+    }
+    if (clicked && mx >= CBX && mx < CBX + 22 && my >= CBY && my < CBY + 22) {
+        show_hitboxes = !show_hitboxes;
+    }
+
+    const int SRY = PY + 72 + 6 * 72;
     const int SLX = PX + 174;
     const int SLW = PW - 230;
     const int SLH = 12;
@@ -308,7 +625,7 @@ static bool draw_config_screen(
         peak_threshold = std::clamp((float)(mx - SLX) / (float)SLW, 0.0f, 1.0f);
     }
 
-    const int METER_Y = PY + 72 + 6 * 72 - 8;
+    const int METER_Y = PY + 72 + 7 * 72 - 8;
     const int METER_X = PX + 24;
     const int METER_W = PW - 48;
     const int METER_H = 24;
@@ -409,7 +726,7 @@ static Layout build_default_layout() {
         }
     }
 
-    const int DW = 28, DH = 52, DG = 6;
+    const int DW = 56, DH = 104, DG = 12;
     L.disp = { OX + 7*SX, 30, DW, DH, DG };
 
     L.peak = { L.disp.x + 3*DW + 2*DG + 26, 30 + DH/2, 7 };
@@ -472,6 +789,11 @@ static Layout load_layout() {
         if (j.contains("display")) {
             auto& d = j["display"];
             L.disp = { d["x"], d["y"], d["dw"], d["dh"], d["gap"] };
+            if (L.disp.dw <= 28 && L.disp.dh <= 52) {
+                L.disp.dw *= 2;
+                L.disp.dh *= 2;
+                L.disp.gap *= 2;
+            }
         }
         if (j.contains("knobs")) {
             for (int i = 0; i < sp303::KNOB_COUNT; ++i) {
@@ -493,19 +815,27 @@ static Layout load_layout() {
 // ─── 7-Segment drawing ────────────────────────────────────────────────────────
 
 static void draw_7seg(int x, int y, int dw, int dh, uint8_t mask) {
-    const int t  = 4;
-    const int p  = 2;
-    const int hh = dh / 2;
+    const int t = std::max(2, std::min(dw / 5, dh / 10));
+    const int side_x = std::max(1, t / 2);
+    const int hseg_x = x + side_x;
+    const int hseg_w = std::max(dw - 2 * side_x, 1);
+    const int top_y = y;
+    const int mid_y = y + (dh - t) / 2;
+    const int bot_y = y + dh - t;
+    const int upper_y = y + t;
+    const int lower_y = mid_y + t;
+    const int side_h = std::max(mid_y - upper_y, 1);
     auto col = [&](uint8_t bit) { return (mask & bit) ? C_SEG_ON : C_SEG_OFF; };
-    DrawRectangle(x+t+p,  y,         dw-2*(t+p), t,    col(sp303::SEG_A));
-    DrawRectangle(x+dw-t, y+t,       t,          hh-t, col(sp303::SEG_B));
-    DrawRectangle(x+dw-t, y+hh,      t,          hh-t, col(sp303::SEG_C));
-    DrawRectangle(x+t+p,  y+dh-t,    dw-2*(t+p), t,    col(sp303::SEG_D));
-    DrawRectangle(x,      y+hh,      t,          hh-t, col(sp303::SEG_E));
-    DrawRectangle(x,      y+t,       t,          hh-t, col(sp303::SEG_F));
-    DrawRectangle(x+t+p,  y+hh-t/2,  dw-2*(t+p), t,    col(sp303::SEG_G));
+
+    DrawRectangle(hseg_x, top_y, hseg_w, t, col(sp303::SEG_A));
+    DrawRectangle(x + dw - t, upper_y, t, side_h, col(sp303::SEG_B));
+    DrawRectangle(x + dw - t, lower_y, t, side_h, col(sp303::SEG_C));
+    DrawRectangle(hseg_x, bot_y, hseg_w, t, col(sp303::SEG_D));
+    DrawRectangle(x, lower_y, t, side_h, col(sp303::SEG_E));
+    DrawRectangle(x, upper_y, t, side_h, col(sp303::SEG_F));
+    DrawRectangle(hseg_x, mid_y, hseg_w, t, col(sp303::SEG_G));
     if (mask & sp303::SEG_DP)
-        DrawRectangle(x+dw+2, y+dh-t, t, t, C_SEG_ON);
+        DrawRectangle(x + dw + std::max(1, side_x / 2), y + dh - t, t, t, C_SEG_ON);
 }
 
 static void draw_display(const DispPos& dp, const sp303::Display& disp) {
@@ -560,7 +890,9 @@ static void draw_button(sp303::ButtonID id, const BtnPos& r, const sp303::Button
 
 // ─── Knob (slider) drawing ────────────────────────────────────────────────────
 
-static void draw_knob(const KnobPos& k, const sp303::KnobDef& def, float value, bool dragging) {
+static void draw_knob(const KnobPos& k, const sp303::KnobDef& def, float value, bool dragging, const KnobSpriteAsset& sprite) {
+    (void)def;
+    (void)dragging;
     const int cx = k.x;
     const int cy = k.y;
     const float start_angle = 135.0f;
@@ -568,23 +900,25 @@ static void draw_knob(const KnobPos& k, const sp303::KnobDef& def, float value, 
     const float angle_deg   = start_angle + std::clamp(value, 0.0f, 1.0f) * (end_angle - start_angle);
     const float angle_rad   = angle_deg * (PI / 180.0f);
     const int pointer_len   = std::max(8, k.r - 7);
-    const int lfs = 9;
-    int primary_w = MeasureText(def.primary, lfs);
-    DrawText(def.primary, cx - primary_w/2, cy - k.r - lfs - 10, lfs, dragging ? C_DRAG : C_TEXT);
-    if (def.alt1) {
-        std::string alt = def.alt1;
-        if (def.alt2) { alt += "/"; alt += def.alt2; }
-        int atw = MeasureText(alt.c_str(), 7);
-        DrawText(alt.c_str(), cx - atw/2, cy + k.r + 8, 7, C_ALT);
+    if (sprite.loaded) {
+        float scale = (float)(k.r * 2) / (float)std::max(sprite.texture.width, sprite.texture.height);
+        float draw_w = (float)sprite.texture.width * scale;
+        float draw_h = (float)sprite.texture.height * scale;
+        Vector2 pos = { (float)cx - draw_w / 2.0f, (float)cy - draw_h / 2.0f };
+        DrawTextureEx(sprite.texture, pos, 0.0f, scale, WHITE);
+        int px = cx + (int)std::lround(std::cos(angle_rad) * pointer_len);
+        int py = cy + (int)std::lround(std::sin(angle_rad) * pointer_len);
+        DrawLineEx({(float)cx, (float)cy}, {(float)px, (float)py}, std::max(2.0f, k.r / 7.0f), C_KNOB_THUMB);
+        DrawCircle(cx, cy, std::max(3.0f, k.r / 8.0f), C_KNOB_THUMB);
+        return;
     }
     DrawCircle(cx, cy, (float)(k.r + 2), C_BORDER);
     DrawCircle(cx, cy, (float)k.r, C_KNOB_TRACK);
-    DrawCircle(cx, cy, (float)(k.r - 5), dragging ? C_DRAG : C_KNOB_FILL);
-    DrawCircle(cx, cy, (float)(k.r - 11), C_BG);
+    DrawCircle(cx, cy, (float)(k.r - 5), C_BG);
     int px = cx + (int)std::lround(std::cos(angle_rad) * pointer_len);
     int py = cy + (int)std::lround(std::sin(angle_rad) * pointer_len);
-    DrawLineEx({(float)cx, (float)cy}, {(float)px, (float)py}, 3.0f, C_KNOB_THUMB);
-    DrawCircle(cx, cy, 4.0f, C_KNOB_THUMB);
+    DrawLineEx({(float)cx, (float)cy}, {(float)px, (float)py}, std::max(3.0f, k.r / 7.0f), C_KNOB_THUMB);
+    DrawCircle(cx, cy, std::max(6.0f, k.r / 4.0f), C_KNOB_THUMB);
 }
 
 // ─── PEAK indicator ───────────────────────────────────────────────────────────
@@ -592,8 +926,6 @@ static void draw_knob(const KnobPos& k, const sp303::KnobDef& def, float value, 
 static void draw_peak(const IndPos& p, bool lit) {
     DrawCircle(p.x, p.y, (float)(p.r + 1), C_BORDER);
     DrawCircle(p.x, p.y, (float)p.r,       lit ? C_PEAK_ON : C_PEAK_OFF);
-    const int fs = 8;
-    DrawText("PEAK", p.x - MeasureText("PEAK", fs)/2, p.y + p.r + 3, fs, C_ALT);
 }
 
 // ─── Hit testing ──────────────────────────────────────────────────────────────
@@ -619,6 +951,76 @@ static int snap_to_grid(int v) {
     if (DRAG_GRID <= 1) return v;
     float g = (float)DRAG_GRID;
     return (int)std::lround(v / g) * DRAG_GRID;
+}
+
+struct RenderTransform {
+    float scale = 1.0f;
+    int offx = 0;
+    int offy = 0;
+};
+
+static RenderTransform compute_transform(int screen_w, int screen_h, int design_w, int design_h) {
+    RenderTransform t{};
+    if (design_w <= 0 || design_h <= 0) return t;
+    float sx = (float)screen_w / (float)design_w;
+    float sy = (float)screen_h / (float)design_h;
+    t.scale = std::max(std::min(sx, sy), 0.01f);
+    int drawn_w = (int)std::lround((float)design_w * t.scale);
+    int drawn_h = (int)std::lround((float)design_h * t.scale);
+    t.offx = (screen_w - drawn_w) / 2;
+    t.offy = (screen_h - drawn_h) / 2;
+    return t;
+}
+
+static int to_screen_x(int x, const RenderTransform& t) {
+    return t.offx + (int)std::lround((float)x * t.scale);
+}
+
+static int to_screen_y(int y, const RenderTransform& t) {
+    return t.offy + (int)std::lround((float)y * t.scale);
+}
+
+static int to_design_x(int x, const RenderTransform& t) {
+    return (int)std::lround((float)(x - t.offx) / t.scale);
+}
+
+static int to_design_y(int y, const RenderTransform& t) {
+    return (int)std::lround((float)(y - t.offy) / t.scale);
+}
+
+static BtnPos scale_btn(const BtnPos& r, const RenderTransform& t) {
+    return {
+        to_screen_x(r.x, t),
+        to_screen_y(r.y, t),
+        std::max((int)std::lround((float)r.w * t.scale), 1),
+        std::max((int)std::lround((float)r.h * t.scale), 1)
+    };
+}
+
+static IndPos scale_ind(const IndPos& p, const RenderTransform& t) {
+    return {
+        to_screen_x(p.x, t),
+        to_screen_y(p.y, t),
+        std::max((int)std::lround((float)p.r * t.scale), 1)
+    };
+}
+
+static DispPos scale_disp(const DispPos& d, const RenderTransform& t) {
+    return {
+        to_screen_x(d.x, t),
+        to_screen_y(d.y, t),
+        std::max((int)std::lround((float)d.dw * t.scale), 1),
+        std::max((int)std::lround((float)d.dh * t.scale), 1),
+        std::max((int)std::lround((float)d.gap * t.scale), 1)
+    };
+}
+
+static KnobPos scale_knob(const KnobPos& k, const RenderTransform& t) {
+    return {
+        to_screen_x(k.x, t),
+        to_screen_y(k.y, t),
+        std::max((int)std::lround((float)k.r * t.scale), 1)
+    };
 }
 
 // ─── Drag targets ─────────────────────────────────────────────────────────────
@@ -660,6 +1062,22 @@ static void resize_button_horizontal(Layout& layout, int id, int delta) {
     mirror_pad_button(layout, id);
 }
 
+static void resize_display_linear(Layout& layout, int delta) {
+    int old_dw = std::max(layout.disp.dw, 1);
+    int new_dw = std::clamp(old_dw + delta, 12, 240);
+    float scale = (float)new_dw / (float)old_dw;
+    layout.disp.x -= (int)std::lround((float)(new_dw - old_dw) * 1.5f);
+    layout.disp.y -= (int)std::lround((float)(layout.disp.dh * scale - layout.disp.dh) * 0.5f);
+    layout.disp.dw = new_dw;
+    layout.disp.dh = std::max((int)std::lround((float)layout.disp.dh * scale), 16);
+    layout.disp.gap = std::max((int)std::lround((float)layout.disp.gap * scale), 1);
+}
+
+static void resize_knob_linear(Layout& layout, int knob_index, int delta) {
+    if (knob_index < 0 || knob_index >= sp303::KNOB_COUNT) return;
+    layout.knobs[knob_index].r = std::clamp(layout.knobs[knob_index].r + delta, 8, 160);
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 int main(void) {
@@ -671,30 +1089,49 @@ int main(void) {
     sp303::Device* dev    = sp303::create();
     renderer_controller_mount_card(&controller, dev);
     Layout         layout = load_layout();
+    KnobSpriteAsset knob_sprite = load_knob_sprite_asset();
     Drag           drag;
     int            pressed_btn = -1;
     int            active_knob = -1;
     int            knob_drag_start_y = 0;
     float          knob_drag_start_value = 0.0f;
+    std::vector<OverlayCacheEntry> hitbox_overlays(sp303::BTN_PAD_8 + 1);
 
     auto keymap = load_keymap();
     std::unordered_map<int, sp303::ButtonID> key_held;
     WindowPrefs window_prefs = load_window_prefs();
+    bool show_hitboxes = window_prefs.show_hitboxes;
     int last_saved_w = window_prefs.w;
     int last_saved_h = window_prefs.h;
 
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     InitWindow(window_prefs.w, window_prefs.h, "SP-303");
+    BackgroundAsset background = load_background_asset();
+    if (background.loaded) {
+        SetTextureFilter(background.texture, TEXTURE_FILTER_BILINEAR);
+        int bg_w = std::max(background_width(background) / 2, 1);
+        int bg_h = std::max(background_height(background) / 2, 1);
+        if (GetScreenWidth() != bg_w || GetScreenHeight() != bg_h) {
+            SetWindowSize(bg_w, bg_h);
+        }
+        save_window_prefs(bg_w, bg_h, show_hitboxes);
+        last_saved_w = bg_w;
+        last_saved_h = bg_h;
+        prebuild_hitbox_overlay_cache(hitbox_overlays, background, layout);
+    }
     SetTargetFPS(60);
 
     while (!WindowShouldClose()) {
         int screen_w = GetScreenWidth();
         int screen_h = GetScreenHeight();
         if (screen_w != last_saved_w || screen_h != last_saved_h) {
-            save_window_prefs(screen_w, screen_h);
+            save_window_prefs(screen_w, screen_h, show_hitboxes);
             last_saved_w = screen_w;
             last_saved_h = screen_h;
         }
+        int design_w = background.loaded ? background_width(background) : SW;
+        int design_h = background.loaded ? background_height(background) : SH;
+        RenderTransform xf = compute_transform(screen_w, screen_h, design_w, design_h);
         Vector2 mouse = GetMousePosition();
         int  mx    = (int)mouse.x;
         int  my    = (int)mouse.y;
@@ -748,23 +1185,24 @@ int main(void) {
             // Config screen consumes all clicks
         }
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !config_open) {
-            if (shift) {
+            if (shift && show_hitboxes) {
                 for (int i = 0; i < sp303::BTN_COUNT && drag.target == DRAG_NONE; ++i) {
                     if (i > sp303::BTN_PAD_8 && i <= sp303::BTN_PAD_32) continue;
-                    if (hit_btn(mx, my, layout.buttons[i]))
-                        drag = { i, mx - layout.buttons[i].x, my - layout.buttons[i].y };
+                    BtnPos sb = scale_btn(layout.buttons[i], xf);
+                    if (hit_btn(mx, my, sb))
+                        drag = { i, to_design_x(mx, xf) - layout.buttons[i].x, to_design_y(my, xf) - layout.buttons[i].y };
                 }
-                if (drag.target == DRAG_NONE && hit_circle(mx, my, layout.peak))
-                    drag = { DRAG_PEAK, mx - layout.peak.x, my - layout.peak.y };
-                if (drag.target == DRAG_NONE && hit_disp(mx, my, layout.disp))
-                    drag = { DRAG_DISP, mx - layout.disp.x, my - layout.disp.y };
+                if (drag.target == DRAG_NONE && hit_circle(mx, my, scale_ind(layout.peak, xf)))
+                    drag = { DRAG_PEAK, to_design_x(mx, xf) - layout.peak.x, to_design_y(my, xf) - layout.peak.y };
+                if (drag.target == DRAG_NONE && hit_disp(mx, my, scale_disp(layout.disp, xf)))
+                    drag = { DRAG_DISP, to_design_x(mx, xf) - layout.disp.x, to_design_y(my, xf) - layout.disp.y };
                 for (int i = 0; i < sp303::KNOB_COUNT && drag.target == DRAG_NONE; ++i) {
-                    if (hit_knob(mx, my, layout.knobs[i]))
-                        drag = { DRAG_KNOB_0 + i, mx - layout.knobs[i].x, my - layout.knobs[i].y };
+                    if (hit_knob(mx, my, scale_knob(layout.knobs[i], xf)))
+                        drag = { DRAG_KNOB_0 + i, to_design_x(mx, xf) - layout.knobs[i].x, to_design_y(my, xf) - layout.knobs[i].y };
                 }
             } else {
                 for (int i = 0; i < sp303::KNOB_COUNT; ++i) {
-                    if (hit_knob(mx, my, layout.knobs[i])) {
+                    if (hit_knob(mx, my, scale_knob(layout.knobs[i], xf))) {
                         active_knob = i;
                         knob_drag_start_y = my;
                         knob_drag_start_value = sp303::get_state(dev).knobs[i].value;
@@ -780,8 +1218,9 @@ int main(void) {
                     bool pattern_mode = sp303::is_pattern_mode(dev);
                     bool pattern_recording = sp303::is_pattern_recording(dev);
                     bool pattern_erase_mode = sp303::is_pattern_erase_mode(dev);
+                    bool mark_held = cur.buttons[sp303::BTN_MARK].pressed;
                     for (int i = 0; i < 8; ++i) {
-                        if (hit_btn(mx, my, layout.buttons[sp303::BTN_PAD_1 + i])) {
+                        if (hit_btn(mx, my, scale_btn(layout.buttons[sp303::BTN_PAD_1 + i], xf))) {
                             int pad_id = sp303::BTN_PAD_1 + cur.active_bank * 8 + i;
                             sp303::button_down(dev, (sp303::ButtonID)pad_id);
                             pressed_btn = pad_id;
@@ -809,8 +1248,11 @@ int main(void) {
                                 !sp303::is_recording(dev) &&
                                 !sp303::is_threshold_mode(dev) &&
                                 !sp303::is_delete_mode(dev) &&
-                                !pattern_mode &&
+                                !(pattern_mode && cur.buttons[sp303::BTN_PATTERN_SELECT].lit) &&
                                 !cur.buttons[sp303::BTN_REMAIN].pressed) {
+                                sp303::note_pad_played(dev, slot);
+                                trigger_pad_audio(slot);
+                            } else if (mark_held && sp303::pad_has_sample(dev, slot)) {
                                 sp303::note_pad_played(dev, slot);
                                 trigger_pad_audio(slot);
                             }
@@ -820,7 +1262,7 @@ int main(void) {
                     if (pressed_btn < 0) {
                         for (int i = 0; i < sp303::BTN_COUNT; ++i) {
                             if (i >= sp303::BTN_PAD_1 && i <= sp303::BTN_PAD_32) continue;
-                            if (hit_btn(mx, my, layout.buttons[i])) {
+                            if (hit_btn(mx, my, scale_btn(layout.buttons[i], xf))) {
                                 sp303::button_down(dev, (sp303::ButtonID)i);
                                 pressed_btn = i;
                                 break;
@@ -851,17 +1293,35 @@ int main(void) {
             active_knob = -1;
         }
 
-        if (shift && !config_open) {
+        if (shift && show_hitboxes && !config_open) {
             float wheel = GetMouseWheelMove();
             if (wheel != 0.0f) {
-                int delta = (wheel > 0.0f) ? DRAG_GRID : -DRAG_GRID;
-                for (int i = 0; i < sp303::BTN_COUNT; ++i) {
-                    if (i > sp303::BTN_PAD_8 && i <= sp303::BTN_PAD_32) continue;
-                    if (hit_btn(mx, my, layout.buttons[i])) {
-                        if (ctrl) resize_button_horizontal(layout, i, delta);
-                        else resize_button_vertical(layout, i, delta);
+                int delta = (wheel > 0.0f) ? 1 : -1;
+                bool handled = false;
+                if (hit_disp(mx, my, scale_disp(layout.disp, xf))) {
+                    resize_display_linear(layout, delta);
+                    save_layout(layout);
+                    handled = true;
+                }
+                for (int i = 0; i < sp303::KNOB_COUNT && !handled; ++i) {
+                    if (hit_knob(mx, my, scale_knob(layout.knobs[i], xf))) {
+                        resize_knob_linear(layout, i, delta);
                         save_layout(layout);
-                        break;
+                        handled = true;
+                    }
+                }
+                if (handled) {
+                    wheel = 0.0f;
+                }
+                if (!handled) {
+                    for (int i = 0; i < sp303::BTN_COUNT; ++i) {
+                        if (i > sp303::BTN_PAD_8 && i <= sp303::BTN_PAD_32) continue;
+                        if (hit_btn(mx, my, scale_btn(layout.buttons[i], xf))) {
+                            if (ctrl) resize_button_horizontal(layout, i, delta);
+                            else resize_button_vertical(layout, i, delta);
+                            save_layout(layout);
+                            break;
+                        }
                     }
                 }
             }
@@ -870,22 +1330,22 @@ int main(void) {
         if (drag.target != DRAG_NONE) {
             int t  = drag.target;
             if (t < sp303::BTN_COUNT) {
-                int nx = snap_to_grid(mx - drag.offx);
-                int ny = snap_to_grid(my - drag.offy);
+                int nx = snap_to_grid(to_design_x(mx, xf) - drag.offx);
+                int ny = snap_to_grid(to_design_y(my, xf) - drag.offy);
                 layout.buttons[t].x = nx;
                 layout.buttons[t].y = ny;
                 mirror_pad_button(layout, t);
             } else if (t == DRAG_PEAK) {
-                int nx = snap_to_grid(mx - drag.offx);
-                int ny = snap_to_grid(my - drag.offy);
+                int nx = snap_to_grid(to_design_x(mx, xf) - drag.offx);
+                int ny = snap_to_grid(to_design_y(my, xf) - drag.offy);
                 layout.peak.x = nx; layout.peak.y = ny;
             } else if (t == DRAG_DISP) {
-                int nx = snap_to_grid(mx - drag.offx);
-                int ny = snap_to_grid(my - drag.offy);
+                int nx = snap_to_grid(to_design_x(mx, xf) - drag.offx);
+                int ny = snap_to_grid(to_design_y(my, xf) - drag.offy);
                 layout.disp.x = nx; layout.disp.y = ny;
             } else if (t >= DRAG_KNOB_0 && t < DRAG_KNOB_0 + sp303::KNOB_COUNT) {
-                int nx = snap_to_grid(mx - drag.offx);
-                int ny = snap_to_grid(my - drag.offy);
+                int nx = to_design_x(mx, xf) - drag.offx;
+                int ny = snap_to_grid(to_design_y(my, xf) - drag.offy);
                 layout.knobs[t - DRAG_KNOB_0].x = nx;
                 layout.knobs[t - DRAG_KNOB_0].y = ny;
             }
@@ -925,6 +1385,7 @@ int main(void) {
             bool pattern_mode = sp303::is_pattern_mode(dev);
             bool pattern_recording = sp303::is_pattern_recording(dev);
             bool pattern_erase_mode = sp303::is_pattern_erase_mode(dev);
+            bool mark_held = cur.buttons[sp303::BTN_MARK].pressed;
             for (auto& [key, btn] : keymap) {
                 if (IsKeyPressed(key)) {
                     sp303::ButtonID actual = btn;
@@ -952,9 +1413,12 @@ int main(void) {
                             }
                         } else if (!sampling_active &&
                                    !cur.buttons[sp303::BTN_REMAIN].pressed &&
-                                   !pattern_mode &&
+                                   !(pattern_mode && cur.buttons[sp303::BTN_PATTERN_SELECT].lit) &&
                                    !resample_source &&
                                    !resample_dest) {
+                            sp303::note_pad_played(dev, slot);
+                            trigger_pad_audio(slot);
+                        } else if (mark_held && sp303::pad_has_sample(dev, slot)) {
                             sp303::note_pad_played(dev, slot);
                             trigger_pad_audio(slot);
                         }
@@ -983,29 +1447,89 @@ int main(void) {
 
         BeginDrawing();
         ClearBackground(C_BG);
-
-        for (int i = 0; i < sp303::BTN_COUNT; ++i) {
-            if (i >= sp303::BTN_PAD_1 && i <= sp303::BTN_PAD_32) continue;
-            draw_button((sp303::ButtonID)i, layout.buttons[i], sp303::BUTTON_DEFS[i],
-                        state.buttons[i], drag.target == i);
+        if (background.loaded) {
+            Rectangle src = { 0.0f, 0.0f, (float)background.texture.width, (float)background.texture.height };
+            Rectangle dst = {
+                (float)xf.offx,
+                (float)xf.offy,
+                (float)std::lround((float)design_w * xf.scale),
+                (float)std::lround((float)design_h * xf.scale)
+            };
+            DrawTexturePro(background.texture, src, dst, {0.0f, 0.0f}, 0.0f, WHITE);
         }
 
-        int bank_off = state.active_bank * 8;
-        for (int i = 0; i < 8; ++i) {
-            int pad_id    = sp303::BTN_PAD_1 + bank_off + i;
-            int layout_id = sp303::BTN_PAD_1 + i;
-            draw_button((sp303::ButtonID)pad_id, layout.buttons[layout_id], sp303::BUTTON_DEFS[pad_id],
-                        state.buttons[pad_id], drag.target == layout_id);
+        if (background.loaded) {
+            for (int i = 0; i < sp303::BTN_COUNT; ++i) {
+                if (i >= sp303::BTN_PAD_1 && i <= sp303::BTN_PAD_32) continue;
+                bool pressed = state.buttons[i].pressed;
+                bool lit = state.buttons[i].lit;
+                if (!pressed && !lit) continue;
+                if (i < 0 || i >= (int)hitbox_overlays.size()) continue;
+                BtnPos design_rect = layout.buttons[i];
+                OverlayState overlay_state =
+                    (pressed && lit) ? OVERLAY_LITPRESSED :
+                    (lit ? OVERLAY_LIT : OVERLAY_PRESSED);
+                Texture2D overlay = get_hitbox_overlay_texture(hitbox_overlays[i], background, design_rect, overlay_state);
+                if (overlay.id == 0) continue;
+                Rectangle osrc = { 0.0f, 0.0f, (float)overlay.width, (float)overlay.height };
+                Rectangle odst = {
+                    (float)xf.offx,
+                    (float)xf.offy,
+                    (float)std::lround((float)design_w * xf.scale),
+                    (float)std::lround((float)design_h * xf.scale)
+                };
+                DrawTexturePro(overlay, osrc, odst, {0.0f, 0.0f}, 0.0f, WHITE);
+            }
+
+            int bank_off = state.active_bank * 8;
+            for (int i = 0; i < 8; ++i) {
+                int pad_id = sp303::BTN_PAD_1 + bank_off + i;
+                bool pressed = state.buttons[pad_id].pressed;
+                bool lit = state.buttons[pad_id].lit;
+                if (!pressed && !lit) continue;
+                int cache_id = sp303::BTN_PAD_1 + i;
+                BtnPos design_rect = layout.buttons[cache_id];
+                OverlayState overlay_state =
+                    (pressed && lit) ? OVERLAY_LITPRESSED :
+                    (lit ? OVERLAY_LIT : OVERLAY_PRESSED);
+                Texture2D overlay = get_hitbox_overlay_texture(hitbox_overlays[cache_id], background, design_rect, overlay_state);
+                if (overlay.id == 0) continue;
+                Rectangle osrc = { 0.0f, 0.0f, (float)overlay.width, (float)overlay.height };
+                Rectangle odst = {
+                    (float)xf.offx,
+                    (float)xf.offy,
+                    (float)std::lround((float)design_w * xf.scale),
+                    (float)std::lround((float)design_h * xf.scale)
+                };
+                DrawTexturePro(overlay, osrc, odst, {0.0f, 0.0f}, 0.0f, WHITE);
+            }
+        }
+
+        if (show_hitboxes) {
+            for (int i = 0; i < sp303::BTN_COUNT; ++i) {
+                if (i >= sp303::BTN_PAD_1 && i <= sp303::BTN_PAD_32) continue;
+                draw_button((sp303::ButtonID)i, scale_btn(layout.buttons[i], xf), sp303::BUTTON_DEFS[i],
+                            state.buttons[i], drag.target == i);
+            }
+
+            int bank_off = state.active_bank * 8;
+            for (int i = 0; i < 8; ++i) {
+                int pad_id    = sp303::BTN_PAD_1 + bank_off + i;
+                int layout_id = sp303::BTN_PAD_1 + i;
+                draw_button((sp303::ButtonID)pad_id, scale_btn(layout.buttons[layout_id], xf), sp303::BUTTON_DEFS[pad_id],
+                            state.buttons[pad_id], drag.target == layout_id);
+            }
         }
 
         for (int i = 0; i < sp303::KNOB_COUNT; ++i)
-            draw_knob(layout.knobs[i], sp303::KNOB_DEFS[i],
-                      state.knobs[i].value, active_knob == i || drag.target == DRAG_KNOB_0 + i);
+            draw_knob(scale_knob(layout.knobs[i], xf), sp303::KNOB_DEFS[i],
+                      state.knobs[i].value, active_knob == i || drag.target == DRAG_KNOB_0 + i,
+                      knob_sprite);
 
-        draw_display(layout.disp, state.display);
-        draw_peak(layout.peak, state.indicators[sp303::IND_PEAK].lit);
+        draw_display(scale_disp(layout.disp, xf), state.display);
+        draw_peak(scale_ind(layout.peak, xf), state.indicators[sp303::IND_PEAK].lit);
 
-        if (!config_open && shift)
+        if (!config_open && shift && show_hitboxes)
             DrawText("SHIFT + drag: move  |  SHIFT + wheel on button: resize height  |  SHIFT + CTRL + wheel on button: resize width", 10, screen_h - 18, 9, C_ALT);
         if (!config_open)
             DrawText("[F5] quick-save  [F9] quick-load  [TAB] audio config", screen_w - 330, screen_h - 18, 9, C_ALT);
@@ -1016,7 +1540,9 @@ int main(void) {
                 controller.sel_out, controller.sel_in, controller.sel_rate, controller.sel_buf, controller.sel_card, controller.peak_threshold,
                 controller.out_devs, controller.in_devs, controller.card_dirs, controller.playback_ok,
                 mx, my, IsMouseButtonPressed(MOUSE_BUTTON_LEFT), IsMouseButtonDown(MOUSE_BUTTON_LEFT),
-                controller.config_input_peak);
+                controller.config_input_peak, show_hitboxes);
+
+            save_window_prefs(screen_w, screen_h, show_hitboxes);
 
             if (apply) {
                 if (!controller.card_dirs.empty()) {
@@ -1032,6 +1558,14 @@ int main(void) {
     }
 
     save_layout(layout);
+    unload_hitbox_overlay_cache(hitbox_overlays);
+    if (background.loaded) {
+        UnloadImage(background.image);
+        UnloadTexture(background.texture);
+    }
+    if (knob_sprite.loaded) {
+        UnloadTexture(knob_sprite.texture);
+    }
     sp303::destroy(dev);
     renderer_controller_shutdown(&controller);
     CloseWindow();

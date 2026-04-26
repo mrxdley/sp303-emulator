@@ -95,6 +95,7 @@ static void render_time_stretch(const Sample& s,
 
 static int normalize_bpm_local(int bpm) {
     if (bpm <= 0) return 120;
+    if (bpm < 61) bpm *= 2;
     while (bpm < 40) bpm *= 2;
     while (bpm > 200) bpm = (int)std::lround(bpm * 0.5f);
     return std::clamp(bpm, 40, 200);
@@ -1014,25 +1015,6 @@ bool audio_assign_recording(Audio* a, int slot) {
         a->rec_frames = 0;
         a->rec_write_pos = 0;
         a->rec_full = false;
-    }
-
-    auto quantize = [](float x, int bits) -> float {
-        float levels = (float)((1 << bits) - 1);
-        float v = std::clamp((x + 1.0f) * 0.5f, 0.0f, 1.0f);
-        float q = std::round(v * levels) / levels;
-        return (q * 2.0f) - 1.0f;
-    };
-    if (a->rec_quality == AUDIO_QUALITY_LONG || a->rec_quality == AUDIO_QUALITY_LOFI) {
-        int channels = (int)recorded_channels;
-        float alpha = (a->rec_quality == AUDIO_QUALITY_LONG) ? 0.20f : 0.08f;
-        int bits = (a->rec_quality == AUDIO_QUALITY_LONG) ? 12 : 8;
-        std::vector<float> prev(channels, 0.0f);
-        for (size_t i = 0; i < recorded.size(); ++i) {
-            int ch = (int)(i % channels);
-            float lp = prev[ch] + alpha * (recorded[i] - prev[ch]);
-            prev[ch] = lp;
-            recorded[i] = quantize(lp, bits);
-        }
     }
 
     float min_val = 0.0f, max_val = 0.0f, sum = 0.0f;

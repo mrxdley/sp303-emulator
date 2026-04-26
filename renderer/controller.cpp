@@ -66,6 +66,8 @@ static bool knob_mode_owns_effect_params(sp303::Device* dev) {
     return sp303::get_active_effect_btn(dev) != -1 &&
            !sp303::is_start_end_level_mode(dev) &&
            !sp303::is_time_bpm_mode(dev) &&
+           !sp303::is_pattern_mode(dev) &&
+           !sp303::is_pattern_record_select(dev) &&
            !sp303::is_sampling_standby(dev) &&
            !sp303::is_sampling_ready(dev) &&
            !sp303::is_recording(dev) &&
@@ -576,6 +578,15 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
 
     int mark_pad = sp303::get_last_played_pad(dev);
     bool mark_lit = false;
+    for (int slot = 0; slot < 32; ++slot) {
+        bool marked = false;
+        if (sp303::pad_has_sample(dev, slot)) {
+            int start_value = sp303::audio_get_sample_start(audio, slot);
+            int end_value   = sp303::audio_get_sample_end(audio, slot);
+            marked = (start_value > 0) || (end_value < 127);
+        }
+        sp303::set_pad_marked(dev, slot, marked);
+    }
     if (!sp303::is_pattern_mode(dev) &&
         mark_pad >= 0 &&
         sp303::pad_has_sample(dev, mark_pad)) {
@@ -594,10 +605,16 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     bool in_standby    = sp303::is_sampling_standby(dev);
     bool resample_mode = sp303::is_resampling_mode(dev);
     bool resample_recording = sp303::is_resample_recording(dev);
+    bool immediate_threshold = (sample_threshold_level == 0);
 
     sp303::audio_set_record_from_output(audio, resample_recording);
 
     if (resample_mode) {
+        c->sample_silence_frames = 0;
+    } else if (in_standby && immediate_threshold) {
+        sp303::start_threshold_recording(dev);
+        should_record = sp303::is_recording(dev);
+        is_ready = sp303::is_sampling_ready(dev);
         c->sample_silence_frames = 0;
     } else if (is_ready) {
         if (threshold_crossed) {
@@ -610,7 +627,9 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
             c->sample_silence_frames = 0;
         }
     } else if (should_record && !resample_recording) {
-        if (threshold_crossed) {
+        if (immediate_threshold) {
+            c->sample_silence_frames = 0;
+        } else if (threshold_crossed) {
             c->sample_silence_frames = 0;
         } else {
             c->sample_silence_frames++;
@@ -633,6 +652,14 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
         int target_pad = sp303::get_last_sampling_target_pad(dev);
         if (target_pad >= 0) {
             bool assigned = sp303::audio_assign_recording(audio, target_pad);
+            if (assigned) {
+                sp303::PadProjectState state{};
+                sp303::get_pad_project_state(dev, target_pad, &state);
+                state.has_sample = true;
+                state.recorded_stereo = sp303::get_sampling_stereo(dev);
+                state.recorded_quality = (int)sp303::get_sampling_quality(dev);
+                sp303::set_pad_project_state(dev, target_pad, state);
+            }
             int bpm_quantize = sp303::consume_record_bpm_quantize(dev);
             if (assigned && bpm_quantize >= 40 && bpm_quantize <= 200) {
                 sp303::audio_quantize_sample_end_to_bpm(audio, target_pad, bpm_quantize);
@@ -684,6 +711,8 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
 
     if (!sp303::is_start_end_level_mode(dev) &&
         !sp303::is_time_bpm_mode(dev) &&
+        !sp303::is_pattern_mode(dev) &&
+        !sp303::is_pattern_record_select(dev) &&
         !knob_mode_owns_input_gain(dev) &&
         !mfx_held) {
         int active_fx  = sp303::get_active_effect_btn(dev);

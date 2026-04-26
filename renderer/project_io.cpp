@@ -222,6 +222,8 @@ ProjectIoResult project_save(const std::filesystem::path& project_dir,
         jpad["gate"] = pad.gate_mode;
         jpad["reverse"] = pad.reverse_mode;
         jpad["has_effect"] = pad.has_effect;
+        jpad["recorded_stereo"] = pad.recorded_stereo;
+        jpad["recorded_quality"] = pad.recorded_quality;
 
         if (pad.has_sample && sp303::audio_has_sample(audio, slot)) {
             std::vector<float> pcm;
@@ -301,6 +303,8 @@ ProjectIoResult project_save(const std::filesystem::path& project_dir,
                 {"gate", sample_state.gate_mode},
                 {"reverse", sample_state.reverse_mode},
                 {"has_effect", sample_state.has_effect},
+                {"recorded_stereo", sample_state.recorded_stereo},
+                {"recorded_quality", sample_state.recorded_quality},
                 {"bpm_adjust", sample_state.bpm_adjust},
                 {"time_mode", sample_state.time_mode},
                 {"time_target_bpm", sample_state.time_target_bpm},
@@ -425,6 +429,10 @@ ProjectIoResult project_load(const std::filesystem::path& project_dir,
         dst.state.gate_mode = jpad.value("gate", false);
         dst.state.reverse_mode = jpad.value("reverse", false);
         dst.state.has_effect = jpad.value("has_effect", false);
+        dst.state.recorded_stereo = jpad.value("recorded_stereo", jpad.value("channels", 1) > 1);
+        dst.state.recorded_quality = std::clamp(jpad.value("recorded_quality", (int)sp303::SAMPLE_QUALITY_STANDARD),
+                                                (int)sp303::SAMPLE_QUALITY_STANDARD,
+                                                (int)sp303::SAMPLE_QUALITY_LOFI);
         dst.start_127 = std::clamp(jpad.value("start_127", 0), 0, 127);
         dst.end_127 = std::clamp(jpad.value("end_127", 127), 0, 127);
         dst.level_127 = std::clamp(jpad.value("level_127", 127), 0, 127);
@@ -484,6 +492,10 @@ ProjectIoResult project_load(const std::filesystem::path& project_dir,
                         state.gate_mode = jsample.value("gate", false);
                         state.reverse_mode = jsample.value("reverse", false);
                         state.has_effect = jsample.value("has_effect", false);
+                        state.recorded_stereo = jsample.value("recorded_stereo", jsample.value("channels", 1) > 1);
+                        state.recorded_quality = std::clamp(jsample.value("recorded_quality", (int)sp303::SAMPLE_QUALITY_STANDARD),
+                                                            (int)sp303::SAMPLE_QUALITY_STANDARD,
+                                                            (int)sp303::SAMPLE_QUALITY_LOFI);
                         state.bpm_adjust = jsample.value("bpm_adjust", 0);
                         state.time_mode = jsample.value("time_mode", 0);
                         state.time_target_bpm = jsample.value("time_target_bpm", -1);

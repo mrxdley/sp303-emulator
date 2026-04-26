@@ -150,7 +150,10 @@ struct Device {
     bool pad_loop_mode[32];
     bool pad_gate_mode[32];
     bool pad_reverse_mode[32];
+    bool pad_recorded_stereo[32];
+    int  pad_recorded_quality[32];
     bool pad_is_playing[32];
+    bool pad_is_marked[32];
 
     bool pad_has_sample[32];
     PatternSequencer pattern_seq;

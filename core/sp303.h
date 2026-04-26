@@ -226,6 +226,8 @@ struct PadProjectState {
     bool    gate_mode = false;
     bool    reverse_mode = false;
     bool    has_effect = false;
+    bool    recorded_stereo = false;
+    int     recorded_quality = SAMPLE_QUALITY_STANDARD;
     int     bpm_adjust = 0;
     int     time_mode = 0;
     int     time_target_bpm = -1;
@@ -315,6 +317,7 @@ int  consume_memory_card_sample_save(Device* dev); // backup slot 0-7, else -1
 int  consume_memory_card_sample_load(Device* dev); // backup slot 0-7, else -1
 void set_mark_lit          (Device* dev, bool lit);
 void set_pad_playing       (Device* dev, int pad_index, bool playing);
+void set_pad_marked        (Device* dev, int pad_index, bool marked);
 bool get_sampling_stereo   (const Device* dev);
 SampleQuality get_sampling_quality(const Device* dev);
 

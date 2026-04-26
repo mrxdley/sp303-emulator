@@ -40,6 +40,8 @@ void sync_memory_card_live_sample(Device* dev, int pad_index) {
     dst.state.gate_mode = dev->pad_gate_mode[pad_index];
     dst.state.reverse_mode = dev->pad_reverse_mode[pad_index];
     dst.state.has_effect = dev->pad_has_effect[pad_index];
+    dst.state.recorded_stereo = dev->pad_recorded_stereo[pad_index];
+    dst.state.recorded_quality = dev->pad_recorded_quality[pad_index];
     dev->memory_card_dirty = true;
 }
 
@@ -272,8 +274,11 @@ void pad_clear_sample(Device* dev, int pad_index) {
     dev->pad_gate_mode[pad_index] = false;
     dev->pad_reverse_mode[pad_index] = false;
     dev->pad_has_effect[pad_index] = false;
+    dev->pad_recorded_stereo[pad_index] = false;
+    dev->pad_recorded_quality[pad_index] = SAMPLE_QUALITY_STANDARD;
     dev->pad_led_hold_frames[pad_index] = 0;
     dev->pad_is_playing[pad_index] = false;
+    dev->pad_is_marked[pad_index] = false;
     sync_memory_card_live_sample(dev, pad_index);
 }
 
@@ -289,6 +294,8 @@ bool get_pad_project_state(const Device* dev, int pad_index, PadProjectState* ou
     out->gate_mode = dev->pad_gate_mode[pad_index];
     out->reverse_mode = dev->pad_reverse_mode[pad_index];
     out->has_effect = dev->pad_has_effect[pad_index];
+    out->recorded_stereo = dev->pad_recorded_stereo[pad_index];
+    out->recorded_quality = dev->pad_recorded_quality[pad_index];
     out->bpm_adjust = 0;
     out->time_mode = 0;
     out->time_target_bpm = -1;
@@ -302,6 +309,8 @@ void set_pad_project_state(Device* dev, int pad_index, const PadProjectState& st
     dev->pad_gate_mode[pad_index] = state.gate_mode;
     dev->pad_reverse_mode[pad_index] = state.reverse_mode;
     dev->pad_has_effect[pad_index] = state.has_effect;
+    dev->pad_recorded_stereo[pad_index] = state.recorded_stereo;
+    dev->pad_recorded_quality[pad_index] = std::clamp(state.recorded_quality, (int)SAMPLE_QUALITY_STANDARD, (int)SAMPLE_QUALITY_LOFI);
     sync_memory_card_live_sample(dev, pad_index);
 }
 
@@ -312,6 +321,7 @@ void reset_project_state(Device* dev) {
     for (int i = 0; i < 32; ++i) {
         pad_clear_sample(dev, i);
         dev->pad_led_hold_frames[i] = 0;
+        dev->pad_is_marked[i] = false;
     }
     dev->sampling_state = SAMPLING_IDLE;
     dev->sampling_target_pad = -1;

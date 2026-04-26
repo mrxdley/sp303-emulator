@@ -371,6 +371,7 @@ Device* create() {
     std::memset(dev->pad_loop_mode, 0, sizeof(dev->pad_loop_mode));
     std::memset(dev->pad_gate_mode, 0, sizeof(dev->pad_gate_mode));
     std::memset(dev->pad_reverse_mode, 0, sizeof(dev->pad_reverse_mode));
+    std::memset(dev->pad_is_marked, 0, sizeof(dev->pad_is_marked));
 
     dev->active_effect_btn = -1;
     std::memset(dev->pad_has_effect, 0, sizeof(dev->pad_has_effect));
@@ -642,11 +643,26 @@ void button_down(Device* dev, ButtonID btn) {
             return;
         }
 
-        if (btn == BTN_START_END_LEVEL && dev->pattern_record_select && dev->pattern_record_slot >= 0) {
-            dev->pattern_metronome_edit_mode = !dev->pattern_metronome_edit_mode;
-            dev->pattern_bpm_edit_mode = false;
-            dev->pattern_length_edit_mode = false;
-            dev->pattern_quantize_edit_mode = false;
+        if (btn == BTN_START_END_LEVEL) {
+            int target_slot = dev->pattern_record_slot;
+            if (target_slot < 0 && pattern_is_playing(&dev->pattern_seq)) {
+                target_slot = pattern_get_current_slot(&dev->pattern_seq);
+            }
+            if (target_slot < 0) {
+                for (int i = 0; i < 32; ++i) {
+                    if (pattern_has_data(&dev->pattern_seq, i)) {
+                        target_slot = i;
+                        break;
+                    }
+                }
+            }
+            if (target_slot >= 0) {
+                dev->pattern_record_slot = target_slot;
+                dev->pattern_metronome_edit_mode = !dev->pattern_metronome_edit_mode;
+                dev->pattern_bpm_edit_mode = false;
+                dev->pattern_length_edit_mode = false;
+                dev->pattern_quantize_edit_mode = false;
+            }
             return;
         }
 
@@ -713,6 +729,9 @@ void button_down(Device* dev, ButtonID btn) {
         }
 
         if (!dev->pattern_recording && btn >= BTN_PAD_1 && btn <= BTN_PAD_32) {
+            if (!pattern_ui_active(dev) && pattern_is_playing(&dev->pattern_seq)) {
+                return;
+            }
             int actual_slot = btn - BTN_PAD_1;
 
             if (dev->pattern_record_select) {
@@ -838,7 +857,8 @@ void button_down(Device* dev, ButtonID btn) {
         }
         if (btn == BTN_MARK) {
             if (dev->last_played_pad >= 0 && dev->last_played_pad < 32 &&
-                dev->pad_has_sample[dev->last_played_pad]) {
+                dev->pad_has_sample[dev->last_played_pad] &&
+                dev->pad_is_marked[dev->last_played_pad]) {
                 dev->sampling_state = SAMPLING_TRUNCATE_ARMED;
                 display_raw(dev, SEG_TRC[0], SEG_TRC[1], SEG_TRC[2]);
             }
@@ -887,7 +907,8 @@ void button_down(Device* dev, ButtonID btn) {
     } else if (dev->sampling_state == SAMPLING_TRUNCATE_ARMED) {
         if (btn == BTN_DEL) {
             if (dev->last_played_pad >= 0 && dev->last_played_pad < 32 &&
-                dev->pad_has_sample[dev->last_played_pad]) {
+                dev->pad_has_sample[dev->last_played_pad] &&
+                dev->pad_is_marked[dev->last_played_pad]) {
                 dev->truncate_pad_pending = dev->last_played_pad;
             }
             dev->sampling_state = SAMPLING_IDLE;
@@ -1114,6 +1135,7 @@ void button_down(Device* dev, ButtonID btn) {
                 dev->bpm_armed_for_next_sample = (dev->bpm_value >= 40 && dev->bpm_value <= 200);
             }
         } else if (dev->sampling_state == SAMPLING_IDLE &&
+                   !pattern_mode_active(dev) &&
                    dev->last_played_pad >= 0 &&
                    dev->last_played_pad < 32 &&
                    dev->pad_has_sample[dev->last_played_pad]) {
@@ -1302,8 +1324,11 @@ void button_down(Device* dev, ButtonID btn) {
     }
 
     if (btn == BTN_STEREO) {
-        if (dev->sampling_state == SAMPLING_RESAMPLE_ARMED ||
-            dev->sampling_state == SAMPLING_RESAMPLE_RECORDING) {
+        bool can_change =
+            dev->sampling_state == SAMPLING_STANDBY ||
+            dev->sampling_state == SAMPLING_RESAMPLE_SOURCE ||
+            dev->sampling_state == SAMPLING_RESAMPLE_DEST;
+        if (!can_change) {
             return;
         }
         dev->sampling_stereo = !dev->sampling_stereo;
@@ -1311,8 +1336,11 @@ void button_down(Device* dev, ButtonID btn) {
     }
 
     if (btn == BTN_LONG_LOFI) {
-        if (dev->sampling_state == SAMPLING_RESAMPLE_ARMED ||
-            dev->sampling_state == SAMPLING_RESAMPLE_RECORDING) {
+        bool can_change =
+            dev->sampling_state == SAMPLING_STANDBY ||
+            dev->sampling_state == SAMPLING_RESAMPLE_SOURCE ||
+            dev->sampling_state == SAMPLING_RESAMPLE_DEST;
+        if (!can_change) {
             return;
         }
         if (dev->sampling_quality == SAMPLE_QUALITY_STANDARD) {
@@ -1436,26 +1464,40 @@ void knob_set(Device* dev, KnobID knob, float value) {
     if (knob == KNOB_RESONANCE &&
         dev->sampling_state == SAMPLING_IDLE &&
         dev->pattern_mode &&
-        dev->pattern_bpm_edit_mode) {
+        dev->pattern_bpm_edit_mode &&
+        !dev->pattern_recording) {
         int bpm = 40 + (int)std::lround(clamped * 160.0f);
         pattern_set_bpm(&dev->pattern_seq, bpm);
     }
     if (knob == KNOB_DRIVE &&
-        dev->sampling_state == SAMPLING_IDLE &&
-        dev->pattern_record_slot >= 0) {
-        if (dev->pattern_metronome_edit_mode) {
-            pattern_set_metronome_level(&dev->pattern_seq, dev->pattern_record_slot,
-                std::clamp((int)std::lround(clamped * 127.0f), 0, 127));
-        } else if (dev->pattern_length_edit_mode) {
-            int measures = (clamped <= 0.0f) ? 1 : std::clamp((int)std::lround(1.0f + clamped * 98.0f), 1, 99);
-            if (measures > 20) {
-                int snapped = 20 + (int)std::lround((measures - 20) / 4.0f) * 4;
-                measures = std::clamp(snapped, 20, 99);
+        dev->sampling_state == SAMPLING_IDLE) {
+        int pattern_edit_slot = dev->pattern_record_slot;
+        if (pattern_edit_slot < 0 && pattern_is_playing(&dev->pattern_seq)) {
+            pattern_edit_slot = pattern_get_current_slot(&dev->pattern_seq);
+        }
+        if (pattern_edit_slot < 0) {
+            for (int i = 0; i < 32; ++i) {
+                if (pattern_has_data(&dev->pattern_seq, i)) {
+                    pattern_edit_slot = i;
+                    break;
+                }
             }
-            pattern_set_length_measures(&dev->pattern_seq, dev->pattern_record_slot, measures);
-        } else if (dev->pattern_quantize_edit_mode) {
-            int idx = std::clamp((int)std::lround(clamped * 4.0f), 0, 4);
-            pattern_set_quantize(&dev->pattern_seq, dev->pattern_record_slot, (PatternQuantize)idx);
+        }
+        if (pattern_edit_slot >= 0) {
+            if (dev->pattern_metronome_edit_mode) {
+                pattern_set_metronome_level(&dev->pattern_seq, pattern_edit_slot,
+                    std::clamp((int)std::lround(clamped * 127.0f), 0, 127));
+            } else if (dev->pattern_length_edit_mode) {
+                int measures = (clamped <= 0.0f) ? 1 : std::clamp((int)std::lround(1.0f + clamped * 98.0f), 1, 99);
+                if (measures > 20) {
+                    int snapped = 20 + (int)std::lround((measures - 20) / 4.0f) * 4;
+                    measures = std::clamp(snapped, 20, 99);
+                }
+                pattern_set_length_measures(&dev->pattern_seq, pattern_edit_slot, measures);
+            } else if (dev->pattern_quantize_edit_mode) {
+                int idx = std::clamp((int)std::lround(clamped * 4.0f), 0, 4);
+                pattern_set_quantize(&dev->pattern_seq, pattern_edit_slot, (PatternQuantize)idx);
+            }
         }
     }
 
@@ -1705,8 +1747,15 @@ void tick(Device* dev, uint32_t samples_elapsed) {
                 set_display_number_plain(dev, dev->pattern_tap_display_value);
             } else if (dev->pattern_bpm_edit_mode) {
                 set_display_number_plain(dev, pattern_get_bpm(&dev->pattern_seq));
+            } else if (dev->pattern_metronome_edit_mode) {
+                int target_slot = (record_slot >= 0) ? record_slot : playing_slot;
+                if (target_slot >= 0) {
+                    set_display_number_plain(dev, pattern_get_metronome_level(&dev->pattern_seq, target_slot));
+                } else {
+                    display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);
+                }
             } else {
-                display_raw(dev, SEG_PTN[0], SEG_PTN[1], SEG_PTN[2]);
+                display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);
             }
         } else {
             for (int i = 0; i < 8; ++i) {
@@ -1722,6 +1771,13 @@ void tick(Device* dev, uint32_t samples_elapsed) {
                 set_display_number_plain(dev, dev->pattern_tap_display_value);
             } else if (dev->pattern_bpm_edit_mode) {
                 set_display_number_plain(dev, pattern_get_bpm(&dev->pattern_seq));
+            } else if (dev->pattern_metronome_edit_mode) {
+                int target_slot = (record_slot >= 0) ? record_slot : playing_slot;
+                if (target_slot >= 0) {
+                    set_display_number_plain(dev, pattern_get_metronome_level(&dev->pattern_seq, target_slot));
+                } else {
+                    display_raw(dev, SEG_PTN[0], SEG_PTN[1], SEG_PTN[2]);
+                }
             } else {
                 display_raw(dev, SEG_PTN[0], SEG_PTN[1], SEG_PTN[2]);
             }
@@ -1942,11 +1998,13 @@ void tick(Device* dev, uint32_t samples_elapsed) {
         dev->state.buttons[BTN_DEL].lit = dev->blink_on;
         int bank_start = dev->state.active_bank * 8;
         for (int i = 0; i < 8; ++i) {
-            if (dev->pad_has_sample[bank_start + i]) {
+            if (dev->pad_has_sample[bank_start + i] &&
+                dev->pad_is_marked[bank_start + i]) {
                 dev->state.buttons[visible_pad_button_id(dev, i)].lit = dev->blink_on;
             }
         }
-        if (dev->last_played_pad >= 0) {
+        if (dev->last_played_pad >= 0 &&
+            dev->pad_is_marked[dev->last_played_pad]) {
             int local_pad = dev->last_played_pad - bank_start;
             if (local_pad >= 0 && local_pad < 8) {
                 dev->state.buttons[visible_pad_button_id(dev, local_pad)].lit = true;
@@ -2067,6 +2125,8 @@ void tick(Device* dev, uint32_t samples_elapsed) {
     }
     else if (dev->sampling_state == SAMPLING_MARK_EDIT ||
              dev->sampling_state == SAMPLING_MARK_END_ONLY) {
+        int bank_start = dev->state.active_bank * 8;
+        render_visible_sample_trigger_leds(dev, bank_start);
         dev->state.buttons[BTN_MARK].lit = dev->blink_on;
         display_raw(dev, SEG_DASH, SEG_DASH, SEG_DASH);
     }
@@ -2081,13 +2141,35 @@ void tick(Device* dev, uint32_t samples_elapsed) {
         dev->state.buttons[BTN_REVERSE].lit = dev->pad_reverse_mode[dev->last_played_pad];
     }
 
-    if (!dev->card_emp_lock && dev->sampling_stereo) {
+    bool sampling_mode_lights =
+        !dev->card_emp_lock &&
+        (dev->sampling_state == SAMPLING_STANDBY ||
+         dev->sampling_state == SAMPLING_READY ||
+         dev->sampling_state == SAMPLING_RECORDING ||
+         dev->sampling_state == SAMPLING_RESAMPLE_SOURCE ||
+         dev->sampling_state == SAMPLING_RESAMPLE_DEST ||
+         dev->sampling_state == SAMPLING_RESAMPLE_ARMED ||
+         dev->sampling_state == SAMPLING_RESAMPLE_RECORDING);
+    if (sampling_mode_lights && dev->sampling_stereo) {
         dev->state.buttons[BTN_STEREO].lit = true;
     }
-    if (!dev->card_emp_lock && dev->sampling_quality == SAMPLE_QUALITY_LONG) {
+    if (sampling_mode_lights && dev->sampling_quality == SAMPLE_QUALITY_LONG) {
         dev->state.buttons[BTN_LONG_LOFI].lit = true;
-    } else if (!dev->card_emp_lock && dev->sampling_quality == SAMPLE_QUALITY_LOFI) {
+    } else if (sampling_mode_lights && dev->sampling_quality == SAMPLE_QUALITY_LOFI) {
         dev->state.buttons[BTN_LONG_LOFI].lit = dev->blink_on;
+    } else if (!dev->card_emp_lock &&
+               !pattern_mode_active(dev) &&
+               dev->last_played_pad >= 0 &&
+               dev->last_played_pad < 32 &&
+               dev->pad_has_sample[dev->last_played_pad]) {
+        if (dev->pad_recorded_stereo[dev->last_played_pad]) {
+            dev->state.buttons[BTN_STEREO].lit = true;
+        }
+        if (dev->pad_recorded_quality[dev->last_played_pad] == SAMPLE_QUALITY_LONG) {
+            dev->state.buttons[BTN_LONG_LOFI].lit = true;
+        } else if (dev->pad_recorded_quality[dev->last_played_pad] == SAMPLE_QUALITY_LOFI) {
+            dev->state.buttons[BTN_LONG_LOFI].lit = dev->blink_on;
+        }
     }
 
     // ─── Effect button LED — lit when selected pad carries the active effect ───
@@ -2272,8 +2354,21 @@ int get_pattern_record_slot(const Device* dev) {
 }
 
 int get_pattern_metronome_level(const Device* dev) {
-    if (!dev || dev->pattern_record_slot < 0) return 100;
-    return pattern_get_metronome_level(&dev->pattern_seq, dev->pattern_record_slot);
+    if (!dev) return 100;
+    int slot = dev->pattern_record_slot;
+    if (slot < 0 && pattern_is_playing(&dev->pattern_seq)) {
+        slot = pattern_get_current_slot(&dev->pattern_seq);
+    }
+    if (slot < 0) {
+        for (int i = 0; i < 32; ++i) {
+            if (pattern_has_data(&dev->pattern_seq, i)) {
+                slot = i;
+                break;
+            }
+        }
+    }
+    if (slot < 0) return 100;
+    return pattern_get_metronome_level(&dev->pattern_seq, slot);
 }
 
 int consume_record_bpm_quantize(Device* dev) {
@@ -2473,6 +2568,11 @@ void set_mark_lit(Device* dev, bool lit) {
 void set_pad_playing(Device* dev, int pad_index, bool playing) {
     if (!dev || pad_index < 0 || pad_index >= 32) return;
     dev->pad_is_playing[pad_index] = playing;
+}
+
+void set_pad_marked(Device* dev, int pad_index, bool marked) {
+    if (!dev || pad_index < 0 || pad_index >= 32) return;
+    dev->pad_is_marked[pad_index] = marked;
 }
 
 bool get_sampling_stereo(const Device* dev) {

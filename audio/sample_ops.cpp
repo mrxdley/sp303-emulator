@@ -13,6 +13,7 @@ static uint32_t min_gap_frames(const Audio* a, uint32_t sample_size) {
 
 static int normalize_bpm(int bpm) {
     if (bpm <= 0) return 120;
+    if (bpm < 61) bpm *= 2;
     while (bpm < 40) bpm *= 2;
     while (bpm > 200) bpm = (int)std::lround(bpm * 0.5f);
     return std::clamp(bpm, 40, 200);
