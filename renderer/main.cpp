@@ -200,7 +200,49 @@ struct WindowPrefs {
     int w = SW;
     int h = SH;
     bool show_hitboxes = true;
+    BtnPos config_btn = { 18, 12, 150, 28 };
+    BtnPos memory_btn = { 190, 12, 170, 28 };
+    BtnPos settings_btn = { 382, 12, 140, 28 };
 };
+
+static int scaled_text_size_for_btn(const BtnPos& b) {
+    return std::max(10, (int)std::lround((float)b.h * 0.43f));
+}
+
+static void draw_top_label(const char* text, const BtnPos& b, Color color) {
+    int font_size = scaled_text_size_for_btn(b);
+    int text_w = MeasureText(text, font_size);
+    int tx = b.x + b.w / 2 - text_w / 2;
+    int ty = b.y + std::max(0, (b.h - font_size) / 2);
+    DrawText(text, tx, ty, font_size, color);
+}
+
+static void clamp_top_btn(BtnPos& b, int design_w, int design_h) {
+    b.w = std::max(40, b.w);
+    b.h = std::max(20, b.h);
+    b.x = std::clamp(b.x, 0, std::max(0, design_w - b.w));
+    b.y = std::clamp(b.y, 0, std::max(0, design_h - b.h));
+}
+
+static void normalize_top_btn_prefs(WindowPrefs& p, int design_w, int design_h) {
+    const BtnPos default_config = { 18, 12, 150, 28 };
+    const BtnPos default_memory = { 190, 12, 170, 28 };
+    const BtnPos default_settings = { 382, 12, 140, 28 };
+
+    auto stale_topbar_pos = [&](const BtnPos& b) {
+        return b.w <= 0 || b.h <= 0 ||
+               b.x < -200 || b.x > design_w + 200 ||
+               b.y < -200 || b.y > design_h + 200;
+    };
+
+    if (stale_topbar_pos(p.config_btn)) p.config_btn = default_config;
+    if (stale_topbar_pos(p.memory_btn)) p.memory_btn = default_memory;
+    if (stale_topbar_pos(p.settings_btn)) p.settings_btn = default_settings;
+
+    clamp_top_btn(p.config_btn, design_w, design_h);
+    clamp_top_btn(p.memory_btn, design_w, design_h);
+    clamp_top_btn(p.settings_btn, design_w, design_h);
+}
 
 struct BackgroundAsset {
     Texture2D texture{};
@@ -286,9 +328,17 @@ static bool is_seed_color(Color c) {
     return is_exact_blue_seed(c) || is_exact_gray_seed(c);
 }
 
+static bool is_pure_black(Color c) {
+    return c.r == 0 && c.g == 0 && c.b == 0;
+}
+
+static bool is_pure_white(Color c) {
+    return c.r == 255 && c.g == 255 && c.b == 255;
+}
+
 static bool is_blue_family(Color c) {
     if (c.a == 0) return false;
-    if (c.r == 0 && c.g == 0 && c.b == 0) return false;
+    if (is_pure_black(c) || is_pure_white(c)) return false;
     if (c.b < 18) return false;
     if (c.g < c.r - 20) return false;
     return c.b >= c.g - 24;
@@ -296,7 +346,7 @@ static bool is_blue_family(Color c) {
 
 static bool is_gray_family(Color c) {
     if (c.a == 0) return false;
-    if (c.r == 0 && c.g == 0 && c.b == 0) return false;
+    if (is_pure_black(c) || is_pure_white(c)) return false;
     int hi = std::max({(int)c.r, (int)c.g, (int)c.b});
     int lo = std::min({(int)c.r, (int)c.g, (int)c.b});
     return (hi - lo) <= 44;
@@ -307,7 +357,7 @@ static bool is_fill_family(Color c) {
 }
 
 static std::string hitbox_cache_base(const BackgroundAsset& bg, const BtnPos& rect) {
-    std::string dir = "hitbox_cache/" + bg.cache_key;
+    std::string dir = "hitbox_cache/" + bg.cache_key + "_v3";
     return dir + "/" + std::to_string(rect.x) + "_" + std::to_string(rect.y) + "_" +
            std::to_string(rect.w) + "_" + std::to_string(rect.h);
 }
@@ -353,6 +403,58 @@ static void flood_fill_mask_from_hitbox(Image& mask, const BackgroundAsset& bg, 
                     visited[nidx] = 1;
                     q.push({nx, ny});
                 }
+            }
+        }
+    }
+}
+
+static void fill_mask_holes_in_rect(Image& mask, const BtnPos& rect) {
+    const int w = mask.width;
+    const int h = mask.height;
+    const int rx0 = std::max(rect.x, 0);
+    const int ry0 = std::max(rect.y, 0);
+    const int rx1 = std::min(rect.x + rect.w, w);
+    const int ry1 = std::min(rect.y + rect.h, h);
+    if (rx0 >= rx1 || ry0 >= ry1) return;
+
+    std::vector<unsigned char> outside((size_t)w * (size_t)h, 0);
+    std::queue<std::pair<int, int>> q;
+
+    auto try_push = [&](int x, int y) {
+        if (x < rx0 || x >= rx1 || y < ry0 || y >= ry1) return;
+        size_t idx = (size_t)y * (size_t)w + (size_t)x;
+        if (outside[idx]) return;
+        Color c = GetImageColor(mask, x, y);
+        if (c.a != 0) return;
+        outside[idx] = 1;
+        q.push({x, y});
+    };
+
+    for (int x = rx0; x < rx1; ++x) {
+        try_push(x, ry0);
+        try_push(x, ry1 - 1);
+    }
+    for (int y = ry0; y < ry1; ++y) {
+        try_push(rx0, y);
+        try_push(rx1 - 1, y);
+    }
+
+    static const int DX[4] = {1, -1, 0, 0};
+    static const int DY[4] = {0, 0, 1, -1};
+    while (!q.empty()) {
+        auto [cx, cy] = q.front();
+        q.pop();
+        for (int i = 0; i < 4; ++i) {
+            try_push(cx + DX[i], cy + DY[i]);
+        }
+    }
+
+    for (int y = ry0; y < ry1; ++y) {
+        for (int x = rx0; x < rx1; ++x) {
+            size_t idx = (size_t)y * (size_t)w + (size_t)x;
+            Color c = GetImageColor(mask, x, y);
+            if (c.a == 0 && !outside[idx]) {
+                ImageDrawPixel(&mask, x, y, WHITE);
             }
         }
     }
@@ -446,6 +548,7 @@ static void build_hitbox_overlay_entry(OverlayCacheEntry& entry, const Backgroun
     entry.rect = rect;
     Image mask = GenImageColor(bg.image.width, bg.image.height, BLANK);
     flood_fill_mask_from_hitbox(mask, bg, rect);
+    fill_mask_holes_in_rect(mask, rect);
     entry.pressed = load_or_build_hitbox_overlay_texture(bg, rect, OVERLAY_PRESSED, mask);
     entry.lit = load_or_build_hitbox_overlay_texture(bg, rect, OVERLAY_LIT, mask);
     entry.litpressed = load_or_build_hitbox_overlay_texture(bg, rect, OVERLAY_LITPRESSED, mask);
@@ -486,11 +589,14 @@ static void prebuild_hitbox_overlay_cache(std::vector<OverlayCacheEntry>& cache,
     }
 }
 
-static void save_window_prefs(int w, int h, bool show_hitboxes) {
+static void save_window_prefs(const WindowPrefs& p) {
     json j = {
-        {"w", std::max(w, 1)},
-        {"h", std::max(h, 1)},
-        {"show_hitboxes", show_hitboxes}
+        {"w", std::max(p.w, 1)},
+        {"h", std::max(p.h, 1)},
+        {"show_hitboxes", p.show_hitboxes},
+        {"config_btn", {{"x", p.config_btn.x}, {"y", p.config_btn.y}, {"w", p.config_btn.w}, {"h", p.config_btn.h}}},
+        {"memory_btn", {{"x", p.memory_btn.x}, {"y", p.memory_btn.y}, {"w", p.memory_btn.w}, {"h", p.memory_btn.h}}},
+        {"settings_btn", {{"x", p.settings_btn.x}, {"y", p.settings_btn.y}, {"w", p.settings_btn.w}, {"h", p.settings_btn.h}}}
     };
     std::ofstream f(WINDOW_FILE);
     f << j.dump(2);
@@ -505,6 +611,18 @@ static WindowPrefs load_window_prefs() {
         p.w = std::max((int)j.value("w", SW), 1);
         p.h = std::max((int)j.value("h", SH), 1);
         p.show_hitboxes = (bool)j.value("show_hitboxes", true);
+        if (j.contains("config_btn")) {
+            auto& b = j["config_btn"];
+            p.config_btn = { b.value("x", p.config_btn.x), b.value("y", p.config_btn.y), b.value("w", p.config_btn.w), b.value("h", p.config_btn.h) };
+        }
+        if (j.contains("memory_btn")) {
+            auto& b = j["memory_btn"];
+            p.memory_btn = { b.value("x", p.memory_btn.x), b.value("y", p.memory_btn.y), b.value("w", p.memory_btn.w), b.value("h", p.memory_btn.h) };
+        }
+        if (j.contains("settings_btn")) {
+            auto& b = j["settings_btn"];
+            p.settings_btn = { b.value("x", p.settings_btn.x), b.value("y", p.settings_btn.y), b.value("w", p.settings_btn.w), b.value("h", p.settings_btn.h) };
+        }
         return p;
     } catch (...) {
         return {};
@@ -516,19 +634,19 @@ static const uint32_t BUFFER_SIZES[] = {128, 256, 512, 1024, 2048};
 static const int      N_RATES        = 3;
 static const int      N_BUFS         = 5;
 
-static bool draw_config_screen(
+static int draw_config_screen(
     int screen_w, int screen_h,
-    int& sel_out, int& sel_in, int& sel_rate, int& sel_buf, int& sel_card, float& peak_threshold,
+    int& sel_out, int& sel_in, int& sel_rate, int& sel_buf,
     const std::vector<sp303::AudioDeviceInfo>& out_devs,
     const std::vector<sp303::AudioDeviceInfo>& in_devs,
-    const std::vector<std::string>& card_dirs,
     bool playback_ok, int mx, int my, bool clicked, bool mouse_down,
-    float input_peak, bool& show_hitboxes)
+    float input_peak)
 {
+    (void)mouse_down;
     DrawRectangle(0, 0, screen_w, screen_h, {0, 0, 0, 170});
 
     const int PW = std::min(960, screen_w - 80);
-    const int PH = 520;
+    const int PH = 360;
     const int PX = (screen_w - PW) / 2;
     const int PY = std::max(40, (screen_h - PH) / 2);
     DrawRectangle(PX, PY, PW, PH, {22, 22, 22, 255});
@@ -586,46 +704,7 @@ static bool draw_config_screen(
     d = selector(3, "Buffer size:", std::to_string(BUFFER_SIZES[sel_buf]) + " frames");
     if (d) sel_buf = (sel_buf + d + N_BUFS) % N_BUFS;
 
-    std::string card_name = card_dirs.empty() ? "(no cards)" : card_dirs[sel_card];
-    d = selector(4, "Card folder:", card_name);
-    if (d && !card_dirs.empty())
-        sel_card = (sel_card + d + (int)card_dirs.size()) % (int)card_dirs.size();
-
-    const int TOGGLE_Y = PY + 72 + 5 * 72;
-    const int CBX = PX + 174;
-    const int CBY = TOGGLE_Y + 3;
-    DrawText("Show hitboxes:", PX + 24, TOGGLE_Y - 1, 10, C_ALT);
-    DrawRectangle(CBX, CBY, 22, 22, C_UNLIT);
-    DrawRectangleLines(CBX, CBY, 22, 22, C_BORDER);
-    if (show_hitboxes) {
-        DrawLine(CBX + 4, CBY + 11, CBX + 9, CBY + 16, C_TEXT);
-        DrawLine(CBX + 9, CBY + 16, CBX + 18, CBY + 5, C_TEXT);
-    }
-    if (clicked && mx >= CBX && mx < CBX + 22 && my >= CBY && my < CBY + 22) {
-        show_hitboxes = !show_hitboxes;
-    }
-
-    const int SRY = PY + 72 + 6 * 72;
-    const int SLX = PX + 174;
-    const int SLW = PW - 230;
-    const int SLH = 12;
-    DrawText("Peak threshold:", PX + 24, SRY - 1, 10, C_ALT);
-    DrawRectangle(SLX, SRY + 7, SLW, SLH, C_KNOB_TRACK);
-    DrawRectangleLines(SLX, SRY + 7, SLW, SLH, C_BORDER);
-    float clamped_threshold = std::clamp(peak_threshold, 0.0f, 1.0f);
-    int slider_fill_w = (int)(clamped_threshold * SLW);
-    if (slider_fill_w > 0)
-        DrawRectangle(SLX + 1, SRY + 8, std::max(slider_fill_w - 2, 0), SLH - 2, C_KNOB_FILL);
-    int knob_x = SLX + (int)(clamped_threshold * SLW);
-    DrawCircle(knob_x, SRY + 13, 8.0f, C_KNOB_THUMB);
-    char peak_buf[64];
-    std::snprintf(peak_buf, sizeof(peak_buf), "%.3f", clamped_threshold);
-    DrawText(peak_buf, SLX + SLW + 12, SRY - 1, 10, C_TEXT);
-    if (mouse_down && mx >= SLX && mx < SLX + SLW && my >= SRY && my < SRY + 26) {
-        peak_threshold = std::clamp((float)(mx - SLX) / (float)SLW, 0.0f, 1.0f);
-    }
-
-    const int METER_Y = PY + 72 + 7 * 72 - 8;
+    const int METER_Y = PY + 72 + 4 * 72 - 8;
     const int METER_X = PX + 24;
     const int METER_W = PW - 48;
     const int METER_H = 24;
@@ -664,8 +743,132 @@ static bool draw_config_screen(
     DrawText("APPLY", ABX + ABW/2 - MeasureText("APPLY", 13)/2, ABY + 12, 13, C_TEXT);
 
     if (clicked && mx >= ABX && mx < ABX + ABW && my >= ABY && my < ABY + ABH)
-        return true;
-    return false;
+        return 1;
+    if (clicked && (mx < PX || mx >= PX + PW || my < PY || my >= PY + PH))
+        return -1;
+    return 0;
+}
+
+static int draw_settings_screen(
+    int screen_w, int screen_h,
+    int& sel_card, float& peak_threshold,
+    const std::vector<std::string>& card_dirs,
+    int mx, int my, bool clicked, bool mouse_down,
+    bool& show_hitboxes)
+{
+    DrawRectangle(0, 0, screen_w, screen_h, {0, 0, 0, 170});
+
+    const int PW = std::min(820, screen_w - 80);
+    const int PH = 320;
+    const int PX = (screen_w - PW) / 2;
+    const int PY = std::max(40, (screen_h - PH) / 2);
+    DrawRectangle(PX, PY, PW, PH, {22, 22, 22, 255});
+    DrawRectangleLines(PX, PY, PW, PH, C_BORDER);
+
+    DrawText("SETTINGS", PX + 24, PY + 18, 14, C_TEXT);
+
+    auto selector = [&](int row, const char* label, const std::string& value) -> int {
+        const int RY  = PY + 72 + row * 72;
+        const int LX  = PX + 24;
+        const int VX  = LX + 150;
+        const int BW2 = 26, BH2 = 26;
+
+        DrawText(label, LX, RY + 5, 10, C_ALT);
+        DrawRectangle(VX, RY, BW2, BH2, C_UNLIT);
+        DrawText("<", VX + 9, RY + 6, 10, C_TEXT);
+
+        const int max_val_w = PW - 330;
+        std::string disp = value;
+        while (MeasureText(disp.c_str(), 10) > max_val_w && disp.size() > 1)
+            disp = disp.substr(0, disp.size() - 1);
+        DrawText(disp.c_str(), VX + BW2 + 8, RY + 6, 10, C_TEXT);
+
+        const int NX = VX + BW2 + 8 + MeasureText(disp.c_str(), 10) + 8;
+        DrawRectangle(NX, RY, BW2, BH2, C_UNLIT);
+        DrawText(">", NX + 8, RY + 6, 10, C_TEXT);
+
+        if (!clicked) return 0;
+        if (mx >= VX && mx < VX + BW2 && my >= RY && my < RY + BH2) return -1;
+        if (mx >= NX && mx < NX + BW2 && my >= RY && my < RY + BH2) return +1;
+        return 0;
+    };
+
+    std::string card_name = card_dirs.empty() ? "(no cards)" : card_dirs[sel_card];
+    int d = selector(0, "Card folder:", card_name);
+    if (d && !card_dirs.empty())
+        sel_card = (sel_card + d + (int)card_dirs.size()) % (int)card_dirs.size();
+
+    const int TOGGLE_Y = PY + 72 + 1 * 72;
+    const int CBX = PX + 174;
+    const int CBY = TOGGLE_Y + 3;
+    DrawText("Show hitboxes:", PX + 24, TOGGLE_Y - 1, 10, C_ALT);
+    DrawRectangle(CBX, CBY, 22, 22, C_UNLIT);
+    DrawRectangleLines(CBX, CBY, 22, 22, C_BORDER);
+    if (show_hitboxes) {
+        DrawLine(CBX + 4, CBY + 11, CBX + 9, CBY + 16, C_TEXT);
+        DrawLine(CBX + 9, CBY + 16, CBX + 18, CBY + 5, C_TEXT);
+    }
+    if (clicked && mx >= CBX && mx < CBX + 22 && my >= CBY && my < CBY + 22) {
+        show_hitboxes = !show_hitboxes;
+    }
+
+    const int SRY = PY + 72 + 2 * 72;
+    const int SLX = PX + 174;
+    const int SLW = PW - 230;
+    const int SLH = 12;
+    DrawText("Peak threshold:", PX + 24, SRY - 1, 10, C_ALT);
+    DrawRectangle(SLX, SRY + 7, SLW, SLH, C_KNOB_TRACK);
+    DrawRectangleLines(SLX, SRY + 7, SLW, SLH, C_BORDER);
+    float clamped_threshold = std::clamp(peak_threshold, 0.0f, 1.0f);
+    int slider_fill_w = (int)(clamped_threshold * SLW);
+    if (slider_fill_w > 0)
+        DrawRectangle(SLX + 1, SRY + 8, std::max(slider_fill_w - 2, 0), SLH - 2, C_KNOB_FILL);
+    int knob_x = SLX + (int)(clamped_threshold * SLW);
+    DrawCircle(knob_x, SRY + 13, 8.0f, C_KNOB_THUMB);
+    char peak_buf[64];
+    std::snprintf(peak_buf, sizeof(peak_buf), "%.3f", clamped_threshold);
+    DrawText(peak_buf, SLX + SLW + 12, SRY - 1, 10, C_TEXT);
+    if (mouse_down && mx >= SLX && mx < SLX + SLW && my >= SRY && my < SRY + 26) {
+        peak_threshold = std::clamp((float)(mx - SLX) / (float)SLW, 0.0f, 1.0f);
+    }
+
+    const int ABW = 160, ABH = 38;
+    const int ABX = PX + PW/2 - ABW/2;
+    const int ABY = PY + PH - 52;
+    DrawRectangle(ABX, ABY, ABW, ABH, C_LIT);
+    DrawText("APPLY", ABX + ABW/2 - MeasureText("APPLY", 13)/2, ABY + 12, 13, C_TEXT);
+
+    if (clicked && mx >= ABX && mx < ABX + ABW && my >= ABY && my < ABY + ABH)
+        return 1;
+    if (clicked && (mx < PX || mx >= PX + PW || my < PY || my >= PY + PH))
+        return -1;
+    return 0;
+}
+
+static int draw_memory_card_screen(int screen_w, int screen_h, int mx, int my, bool clicked) {
+    DrawRectangle(0, 0, screen_w, screen_h, {0, 0, 0, 170});
+    const int PW = 520;
+    const int PH = 260;
+    const int PX = (screen_w - PW) / 2;
+    const int PY = std::max(40, (screen_h - PH) / 2);
+    DrawRectangle(PX, PY, PW, PH, {22, 22, 22, 255});
+    DrawRectangleLines(PX, PY, PW, PH, C_BORDER);
+
+    DrawText("MEMORY CARD", PX + 24, PY + 18, 14, C_TEXT);
+    DrawText("Project quicksave/load lives here for now.", PX + 24, PY + 52, 10, C_ALT);
+
+    Rectangle save_btn = {(float)(PX + 40), (float)(PY + 96), (float)(PW - 80), 42.0f};
+    Rectangle load_btn = {(float)(PX + 40), (float)(PY + 150), (float)(PW - 80), 42.0f};
+    DrawRectangleRec(save_btn, C_LIT);
+    DrawRectangleRec(load_btn, C_UNLIT);
+    DrawText("QUICKSAVE", (int)(save_btn.x + save_btn.width/2 - MeasureText("QUICKSAVE", 13)/2), (int)save_btn.y + 14, 13, C_TEXT);
+    DrawText("QUICKLOAD", (int)(load_btn.x + load_btn.width/2 - MeasureText("QUICKLOAD", 13)/2), (int)load_btn.y + 14, 13, C_TEXT);
+
+    if (!clicked) return 0;
+    if (CheckCollisionPointRec({(float)mx, (float)my}, save_btn)) return 1;
+    if (CheckCollisionPointRec({(float)mx, (float)my}, load_btn)) return 2;
+    if (mx < PX || mx >= PX + PW || my < PY || my >= PY + PH) return -1;
+    return 0;
 }
 
 // ─── Default layout ───────────────────────────────────────────────────────────
@@ -764,6 +967,15 @@ static Layout load_layout() {
     try {
         json   j = json::parse(f);
         Layout L = build_default_layout();
+        if (j.contains("buttons")) {
+            // Legacy desktop layout bug stored HOLD/EXT_SOURCE under 59/60.
+            if (!j["buttons"].contains("53") && j["buttons"].contains("59")) {
+                j["buttons"]["53"] = j["buttons"]["59"];
+            }
+            if (!j["buttons"].contains("54") && j["buttons"].contains("60")) {
+                j["buttons"]["54"] = j["buttons"]["60"];
+            }
+        }
         if (j.contains("buttons")) {
             for (int i = 0; i < sp303::BTN_COUNT; ++i) {
                 if (i > sp303::BTN_PAD_8 && i <= sp303::BTN_PAD_32) continue;
@@ -1029,6 +1241,9 @@ static const int DRAG_NONE   = -1;
 static const int DRAG_PEAK   = sp303::BTN_COUNT;
 static const int DRAG_DISP   = sp303::BTN_COUNT + 1;
 static const int DRAG_KNOB_0 = sp303::BTN_COUNT + 2;
+static const int DRAG_TOP_CONFIG   = sp303::BTN_COUNT + 2 + sp303::KNOB_COUNT;
+static const int DRAG_TOP_MEMORY   = DRAG_TOP_CONFIG + 1;
+static const int DRAG_TOP_SETTINGS = DRAG_TOP_MEMORY + 1;
 
 struct Drag {
     int target = DRAG_NONE;
@@ -1085,6 +1300,9 @@ int main(void) {
     renderer_controller_init(&controller);
 
     bool config_open = false;
+    bool memory_open = false;
+    bool settings_open = false;
+    bool menu_click_consumed = false;
 
     sp303::Device* dev    = sp303::create();
     renderer_controller_mount_card(&controller, dev);
@@ -1095,7 +1313,7 @@ int main(void) {
     int            active_knob = -1;
     int            knob_drag_start_y = 0;
     float          knob_drag_start_value = 0.0f;
-    std::vector<OverlayCacheEntry> hitbox_overlays(sp303::BTN_PAD_8 + 1);
+    std::vector<OverlayCacheEntry> hitbox_overlays(sp303::BTN_COUNT);
 
     auto keymap = load_keymap();
     std::unordered_map<int, sp303::ButtonID> key_held;
@@ -1114,7 +1332,10 @@ int main(void) {
         if (GetScreenWidth() != bg_w || GetScreenHeight() != bg_h) {
             SetWindowSize(bg_w, bg_h);
         }
-        save_window_prefs(bg_w, bg_h, show_hitboxes);
+        window_prefs.w = bg_w;
+        window_prefs.h = bg_h;
+        window_prefs.show_hitboxes = show_hitboxes;
+        save_window_prefs(window_prefs);
         last_saved_w = bg_w;
         last_saved_h = bg_h;
         prebuild_hitbox_overlay_cache(hitbox_overlays, background, layout);
@@ -1122,15 +1343,36 @@ int main(void) {
     SetTargetFPS(60);
 
     while (!WindowShouldClose()) {
+        menu_click_consumed = false;
         int screen_w = GetScreenWidth();
         int screen_h = GetScreenHeight();
         if (screen_w != last_saved_w || screen_h != last_saved_h) {
-            save_window_prefs(screen_w, screen_h, show_hitboxes);
+            window_prefs.w = screen_w;
+            window_prefs.h = screen_h;
+            window_prefs.show_hitboxes = show_hitboxes;
+            save_window_prefs(window_prefs);
             last_saved_w = screen_w;
             last_saved_h = screen_h;
         }
         int design_w = background.loaded ? background_width(background) : SW;
         int design_h = background.loaded ? background_height(background) : SH;
+        WindowPrefs before_norm = window_prefs;
+        normalize_top_btn_prefs(window_prefs, design_w, design_h);
+        if (before_norm.config_btn.x != window_prefs.config_btn.x ||
+            before_norm.config_btn.y != window_prefs.config_btn.y ||
+            before_norm.config_btn.w != window_prefs.config_btn.w ||
+            before_norm.config_btn.h != window_prefs.config_btn.h ||
+            before_norm.memory_btn.x != window_prefs.memory_btn.x ||
+            before_norm.memory_btn.y != window_prefs.memory_btn.y ||
+            before_norm.memory_btn.w != window_prefs.memory_btn.w ||
+            before_norm.memory_btn.h != window_prefs.memory_btn.h ||
+            before_norm.settings_btn.x != window_prefs.settings_btn.x ||
+            before_norm.settings_btn.y != window_prefs.settings_btn.y ||
+            before_norm.settings_btn.w != window_prefs.settings_btn.w ||
+            before_norm.settings_btn.h != window_prefs.settings_btn.h) {
+            window_prefs.show_hitboxes = show_hitboxes;
+            save_window_prefs(window_prefs);
+        }
         RenderTransform xf = compute_transform(screen_w, screen_h, design_w, design_h);
         Vector2 mouse = GetMousePosition();
         int  mx    = (int)mouse.x;
@@ -1161,12 +1403,36 @@ int main(void) {
             sp303::audio_trigger_mode(controller.audio, slot, loop_mode, gate_mode, reverse_mode);
         };
 
-        if (IsKeyPressed(KEY_TAB)) config_open = !config_open;
-        if (!config_open && IsKeyPressed(KEY_F5)) {
+        auto any_gate_pad_held = [&]() -> bool {
+            sp303::State s = sp303::get_state(dev);
+            for (int i = 0; i < 32; ++i) {
+                if (!sp303::get_pad_gate_mode(dev, i)) continue;
+                if (s.buttons[sp303::BTN_PAD_1 + i].pressed) return true;
+            }
+            return false;
+        };
+
+        BtnPos config_btn = scale_btn(window_prefs.config_btn, xf);
+        BtnPos memory_btn = scale_btn(window_prefs.memory_btn, xf);
+        BtnPos settings_btn = scale_btn(window_prefs.settings_btn, xf);
+
+        if (IsKeyPressed(KEY_TAB)) {
+            config_open = !config_open;
+            if (config_open) { memory_open = false; settings_open = false; }
+        }
+        if (IsKeyPressed(KEY_F6)) {
+            memory_open = !memory_open;
+            if (memory_open) { config_open = false; settings_open = false; }
+        }
+        if (IsKeyPressed(KEY_F7)) {
+            settings_open = !settings_open;
+            if (settings_open) { config_open = false; memory_open = false; }
+        }
+        if (!config_open && !memory_open && !settings_open && IsKeyPressed(KEY_F5)) {
             ProjectIoResult res = project_save(QUICKSAVE_DIR, dev, controller.audio, controller.audio_cfg);
             std::printf("[PROJECT] %s\n", res.message.c_str());
         }
-            if (!config_open && IsKeyPressed(KEY_F9)) {
+        if (!config_open && !memory_open && !settings_open && IsKeyPressed(KEY_F9)) {
             release_live_inputs();
             drag.target = DRAG_NONE;
             sp303::Device* loaded_dev = sp303::create();
@@ -1181,11 +1447,33 @@ int main(void) {
             std::printf("[PROJECT] %s\n", res.message.c_str());
         }
 
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && config_open) {
+        bool mouse_menu_open_allowed = !show_hitboxes;
+        if (mouse_menu_open_allowed && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hit_btn(mx, my, config_btn)) {
+            config_open = !config_open;
+            if (config_open) { memory_open = false; settings_open = false; }
+            menu_click_consumed = true;
+        } else if (mouse_menu_open_allowed && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hit_btn(mx, my, memory_btn)) {
+            memory_open = !memory_open;
+            if (memory_open) { config_open = false; settings_open = false; }
+            menu_click_consumed = true;
+        } else if (mouse_menu_open_allowed && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hit_btn(mx, my, settings_btn)) {
+            settings_open = !settings_open;
+            if (settings_open) { config_open = false; memory_open = false; }
+            menu_click_consumed = true;
+        }
+
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && (config_open || memory_open || settings_open)) {
             // Config screen consumes all clicks
         }
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !config_open) {
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !config_open && !memory_open && !settings_open) {
             if (shift && show_hitboxes) {
+                if (hit_btn(mx, my, config_btn)) {
+                    drag = { DRAG_TOP_CONFIG, to_design_x(mx, xf) - window_prefs.config_btn.x, to_design_y(my, xf) - window_prefs.config_btn.y };
+                } else if (hit_btn(mx, my, memory_btn)) {
+                    drag = { DRAG_TOP_MEMORY, to_design_x(mx, xf) - window_prefs.memory_btn.x, to_design_y(my, xf) - window_prefs.memory_btn.y };
+                } else if (hit_btn(mx, my, settings_btn)) {
+                    drag = { DRAG_TOP_SETTINGS, to_design_x(mx, xf) - window_prefs.settings_btn.x, to_design_y(my, xf) - window_prefs.settings_btn.y };
+                }
                 for (int i = 0; i < sp303::BTN_COUNT && drag.target == DRAG_NONE; ++i) {
                     if (i > sp303::BTN_PAD_8 && i <= sp303::BTN_PAD_32) continue;
                     BtnPos sb = scale_btn(layout.buttons[i], xf);
@@ -1264,6 +1552,16 @@ int main(void) {
                             if (i >= sp303::BTN_PAD_1 && i <= sp303::BTN_PAD_32) continue;
                             if (hit_btn(mx, my, scale_btn(layout.buttons[i], xf))) {
                                 sp303::button_down(dev, (sp303::ButtonID)i);
+                                if (controller.audio && i == sp303::BTN_HOLD) {
+                                    bool hold_on = sp303::audio_get_hold_enabled(controller.audio);
+                                    if (hold_on) {
+                                        sp303::audio_set_hold_enabled(controller.audio, false);
+                                        sp303::note_hold_toggled(dev);
+                                    } else if (any_gate_pad_held()) {
+                                        sp303::audio_set_hold_enabled(controller.audio, true);
+                                        sp303::note_hold_toggled(dev);
+                                    }
+                                }
                                 pressed_btn = i;
                                 break;
                             }
@@ -1275,6 +1573,12 @@ int main(void) {
 
         if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
             if (drag.target != DRAG_NONE) {
+                if (drag.target == DRAG_TOP_CONFIG ||
+                    drag.target == DRAG_TOP_MEMORY ||
+                    drag.target == DRAG_TOP_SETTINGS) {
+                    window_prefs.show_hitboxes = show_hitboxes;
+                    save_window_prefs(window_prefs);
+                }
                 drag.target = DRAG_NONE;
                 save_layout(layout);
             }
@@ -1293,7 +1597,7 @@ int main(void) {
             active_knob = -1;
         }
 
-        if (shift && show_hitboxes && !config_open) {
+        if (shift && show_hitboxes && !config_open && !settings_open) {
             float wheel = GetMouseWheelMove();
             if (wheel != 0.0f) {
                 int delta = (wheel > 0.0f) ? 1 : -1;
@@ -1348,6 +1652,15 @@ int main(void) {
                 int ny = snap_to_grid(to_design_y(my, xf) - drag.offy);
                 layout.knobs[t - DRAG_KNOB_0].x = nx;
                 layout.knobs[t - DRAG_KNOB_0].y = ny;
+            } else if (t == DRAG_TOP_CONFIG) {
+                window_prefs.config_btn.x = snap_to_grid(to_design_x(mx, xf) - drag.offx);
+                window_prefs.config_btn.y = snap_to_grid(to_design_y(my, xf) - drag.offy);
+            } else if (t == DRAG_TOP_MEMORY) {
+                window_prefs.memory_btn.x = snap_to_grid(to_design_x(mx, xf) - drag.offx);
+                window_prefs.memory_btn.y = snap_to_grid(to_design_y(my, xf) - drag.offy);
+            } else if (t == DRAG_TOP_SETTINGS) {
+                window_prefs.settings_btn.x = snap_to_grid(to_design_x(mx, xf) - drag.offx);
+                window_prefs.settings_btn.y = snap_to_grid(to_design_y(my, xf) - drag.offy);
             }
         }
 
@@ -1357,7 +1670,7 @@ int main(void) {
             sp303::knob_set(dev, (sp303::KnobID)active_knob, v);
         }
 
-        if (!shift && !config_open) {
+        if (!shift && !config_open && !memory_open && !settings_open) {
             if (IsKeyPressed(KEY_Q)) {
                 sp303::button_down(dev, sp303::BTN_CANCEL);
                 key_held[KEY_Q] = sp303::BTN_CANCEL;
@@ -1392,6 +1705,16 @@ int main(void) {
                     if (btn >= sp303::BTN_PAD_1 && btn <= sp303::BTN_PAD_8)
                         actual = (sp303::ButtonID)(sp303::BTN_PAD_1 + cur.active_bank * 8 + (btn - sp303::BTN_PAD_1));
                     sp303::button_down(dev, actual);
+                    if (controller.audio && actual == sp303::BTN_HOLD) {
+                        bool hold_on = sp303::audio_get_hold_enabled(controller.audio);
+                        if (hold_on) {
+                            sp303::audio_set_hold_enabled(controller.audio, false);
+                            sp303::note_hold_toggled(dev);
+                        } else if (any_gate_pad_held()) {
+                            sp303::audio_set_hold_enabled(controller.audio, true);
+                            sp303::note_hold_toggled(dev);
+                        }
+                    }
                     key_held[key] = actual;
                     if (actual >= sp303::BTN_PAD_1 && actual <= sp303::BTN_PAD_32) {
                         int slot = actual - sp303::BTN_PAD_1;
@@ -1529,28 +1852,79 @@ int main(void) {
         draw_display(scale_disp(layout.disp, xf), state.display);
         draw_peak(scale_ind(layout.peak, xf), state.indicators[sp303::IND_PEAK].lit);
 
-        if (!config_open && shift && show_hitboxes)
+        if (!config_open && !memory_open && !settings_open && shift && show_hitboxes)
             DrawText("SHIFT + drag: move  |  SHIFT + wheel on button: resize height  |  SHIFT + CTRL + wheel on button: resize width", 10, screen_h - 18, 9, C_ALT);
-        if (!config_open)
-            DrawText("[F5] quick-save  [F9] quick-load  [TAB] audio config", screen_w - 330, screen_h - 18, 9, C_ALT);
+
+        draw_top_label("IN-LINE-OUT", config_btn, C_TEXT);
+        draw_top_label("MEMORY CARD", memory_btn, C_TEXT);
+        draw_top_label("SETTINGS", settings_btn, C_TEXT);
 
         if (config_open) {
-            bool apply = draw_config_screen(
+            int apply = draw_config_screen(
                 screen_w, screen_h,
-                controller.sel_out, controller.sel_in, controller.sel_rate, controller.sel_buf, controller.sel_card, controller.peak_threshold,
-                controller.out_devs, controller.in_devs, controller.card_dirs, controller.playback_ok,
-                mx, my, IsMouseButtonPressed(MOUSE_BUTTON_LEFT), IsMouseButtonDown(MOUSE_BUTTON_LEFT),
-                controller.config_input_peak, show_hitboxes);
+                controller.sel_out, controller.sel_in, controller.sel_rate, controller.sel_buf,
+                controller.out_devs, controller.in_devs, controller.playback_ok,
+                mx, my, IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !menu_click_consumed, IsMouseButtonDown(MOUSE_BUTTON_LEFT),
+                controller.config_input_peak);
 
-            save_window_prefs(screen_w, screen_h, show_hitboxes);
+            window_prefs.w = screen_w;
+            window_prefs.h = screen_h;
+            window_prefs.show_hitboxes = show_hitboxes;
+            save_window_prefs(window_prefs);
 
-            if (apply) {
-                if (!controller.card_dirs.empty()) {
-                    controller.card_path = controller.card_dirs[controller.sel_card];
-                }
+            if (apply == 1) {
                 renderer_controller_apply_audio_config(&controller);
                 renderer_controller_refresh_cards(&controller);
                 renderer_controller_mount_card(&controller, dev);
+                config_open = false;
+            } else if (apply == -1) {
+                config_open = false;
+            }
+        } else if (memory_open) {
+            int action = draw_memory_card_screen(screen_w, screen_h, mx, my, IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !menu_click_consumed);
+            if (action == 1) {
+                ProjectIoResult res = project_save(QUICKSAVE_DIR, dev, controller.audio, controller.audio_cfg);
+                std::printf("[PROJECT] %s\n", res.message.c_str());
+                memory_open = false;
+            } else if (action == 2) {
+                release_live_inputs();
+                drag.target = DRAG_NONE;
+                sp303::Device* loaded_dev = sp303::create();
+                ProjectIoResult res = project_load(QUICKSAVE_DIR, loaded_dev, controller.audio, controller.audio_cfg);
+                if (res.ok) {
+                    renderer_controller_mount_card(&controller, loaded_dev);
+                    sp303::destroy(dev);
+                    dev = loaded_dev;
+                } else {
+                    sp303::destroy(loaded_dev);
+                }
+                std::printf("[PROJECT] %s\n", res.message.c_str());
+                memory_open = false;
+            } else if (action == -1) {
+                memory_open = false;
+            }
+        } else if (settings_open) {
+            int apply = draw_settings_screen(
+                screen_w, screen_h,
+                controller.sel_card, controller.peak_threshold,
+                controller.card_dirs,
+                mx, my, IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !menu_click_consumed, IsMouseButtonDown(MOUSE_BUTTON_LEFT),
+                show_hitboxes);
+
+            window_prefs.w = screen_w;
+            window_prefs.h = screen_h;
+            window_prefs.show_hitboxes = show_hitboxes;
+            save_window_prefs(window_prefs);
+
+            if (apply == 1) {
+                if (!controller.card_dirs.empty()) {
+                    controller.card_path = controller.card_dirs[controller.sel_card];
+                }
+                renderer_controller_refresh_cards(&controller);
+                renderer_controller_mount_card(&controller, dev);
+                settings_open = false;
+            } else if (apply == -1) {
+                settings_open = false;
             }
         }
 

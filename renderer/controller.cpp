@@ -57,9 +57,16 @@ static float time_mode_to_knob(int mode, int target_bpm, int source_bpm) {
 
 static bool knob_mode_owns_input_gain(sp303::Device* dev) {
     return sp303::is_sampling_standby(dev) ||
-           sp303::is_sampling_ready(dev) ||
            sp303::is_recording(dev) ||
            sp303::is_resampling_mode(dev);
+}
+
+static void set_plain_display_blank_leading(sp303::Display* d, int value) {
+    if (!d) return;
+    value = std::clamp(value, 0, 999);
+    d->digit[0] = (value >= 100) ? sp303::SEG_DIGITS[(value / 100) % 10] : sp303::SEG_BLANK;
+    d->digit[1] = (value >= 10)  ? sp303::SEG_DIGITS[(value / 10) % 10]  : sp303::SEG_BLANK;
+    d->digit[2] = sp303::SEG_DIGITS[value % 10];
 }
 
 static bool knob_mode_owns_effect_params(sp303::Device* dev) {
@@ -278,7 +285,7 @@ bool renderer_controller_init(RendererController* c) {
 
     std::printf("[SP-303] Output: %s\n", c->out_devs.empty() ? "(none)" : c->out_devs[c->sel_out].name);
     std::printf("[SP-303] Input:  %s\n", c->in_devs.empty() ? "(none)" : c->in_devs[c->sel_in].name);
-    c->cached_input_gain = 0.8f;
+    c->cached_input_gain = 1.0f;
     c->cached_fx_p1 = 0.5f;
     c->cached_fx_p2 = 0.5f;
     c->cached_fx_p3 = 0.5f;
@@ -323,6 +330,7 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     if (!c || !c->audio) return state;
 
     sp303::Audio* audio = c->audio;
+    state.buttons[sp303::BTN_HOLD].lit = false;
     for (int i = 0; i < 32; ++i) {
         sp303::set_pad_playing(dev, i, sp303::audio_is_playing(audio, i));
     }
@@ -370,6 +378,9 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     }
     if (input_gain_mode) {
         c->cached_input_gain = state.knobs[sp303::KNOB_DRIVE].value;
+        if (active_knob == sp303::KNOB_DRIVE) {
+            c->rec_gain_touched = true;
+        }
     }
     if (effect_param_mode) {
         c->cached_fx_p1 = state.knobs[sp303::KNOB_CUTOFF].value;
@@ -414,7 +425,26 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     c->was_input_gain_mode = input_gain_mode;
     c->was_effect_param_mode = effect_param_mode;
 
+    bool rec_gain_display_phase =
+        sp303::is_sampling_standby(dev) &&
+        !state.buttons[sp303::BTN_TIME_BPM].lit;
+    if (rec_gain_display_phase && c->rec_gain_touched) {
+        int value = std::clamp((int)std::lround(c->cached_input_gain * 127.0f), 0, 127);
+        set_plain_display_blank_leading(&state.display, value);
+    }
+
     sp303::audio_set_pattern_bpm(audio, sp303::get_pattern_bpm(dev));
+
+    bool pattern_playing = sp303::is_pattern_playing(dev);
+    bool pattern_recording = sp303::is_pattern_recording(dev);
+    if ((!c->was_pattern_playing && pattern_playing) ||
+        (!c->was_pattern_recording && pattern_recording) ||
+        (c->was_pattern_playing && !pattern_playing) ||
+        (c->was_pattern_recording && !pattern_recording)) {
+        sp303::audio_set_hold_enabled(audio, false);
+    }
+    c->was_pattern_playing = pattern_playing;
+    c->was_pattern_recording = pattern_recording;
 
     if (sp303::is_pattern_record_select(dev) && !sp303::is_pattern_recording(dev)) {
         if (!c->was_pattern_record_select) {
@@ -440,6 +470,10 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
     for (;;) {
         sp303::PatternProjectEvent pev{};
         if (!sp303::consume_pattern_trigger(dev, &pev)) break;
+        if (pev.type == 1) {
+            sp303::audio_set_hold_enabled(audio, !sp303::audio_get_hold_enabled(audio));
+            continue;
+        }
         int slot = pev.sample_pad;
         if (!sp303::pad_has_sample(dev, slot)) continue;
         bool loop_mode = sp303::get_pad_loop_mode(dev, slot);
@@ -736,5 +770,11 @@ sp303::State renderer_controller_step(RendererController* c, sp303::Device* dev,
         }
     }
 
-    return sp303::get_state(dev);
+    state = sp303::get_state(dev);
+    state.buttons[sp303::BTN_HOLD].lit = false;
+    if (rec_gain_display_phase && c->rec_gain_touched) {
+        int value = std::clamp((int)std::lround(c->cached_input_gain * 127.0f), 0, 127);
+        set_plain_display_blank_leading(&state.display, value);
+    }
+    return state;
 }

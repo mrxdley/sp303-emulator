@@ -234,6 +234,7 @@ struct PadProjectState {
 };
 
 struct PatternProjectEvent {
+    int type = 0;
     int tick = 0;
     int sample_pad = 0;
     int velocity = 127;
@@ -287,6 +288,7 @@ bool is_sampling_standby   (const Device* dev);
 bool is_sampling_ready     (const Device* dev);
 bool is_recording          (const Device* dev);
 bool is_pattern_mode       (const Device* dev);
+bool is_pattern_playing    (const Device* dev);
 bool is_pattern_recording  (const Device* dev);
 bool is_pattern_record_select(const Device* dev);
 bool is_pattern_erase_mode (const Device* dev);
@@ -306,6 +308,7 @@ void set_sampling_full     (Device* dev);         // called when audio buffer fi
 void start_threshold_recording (Device* dev);
 void finish_threshold_recording(Device* dev);
 void note_pad_played       (Device* dev, int pad_index, int velocity = 127);
+void note_hold_toggled     (Device* dev);
 void set_edit_display_value(Device* dev, int value);
 int  consume_deleted_pad   (Device* dev); // -1 if none
 int  consume_truncate_pad  (Device* dev); // -1 if none

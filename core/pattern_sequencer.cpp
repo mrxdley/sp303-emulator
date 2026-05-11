@@ -43,6 +43,7 @@ static void sort_events(PatternSequencer* seq, int slot) {
     auto& events = seq->slots[slot].events;
     std::sort(events.begin(), events.end(), [](const PatternEvent& a, const PatternEvent& b) {
         if (a.tick != b.tick) return a.tick < b.tick;
+        if (a.type != b.type) return a.type < b.type;
         if (a.velocity != b.velocity) return a.velocity < b.velocity;
         return a.sample_pad < b.sample_pad;
     });
@@ -170,7 +171,8 @@ void pattern_clear_events(PatternSequencer* seq, int slot) {
 
 bool pattern_append_event(PatternSequencer* seq, int slot, const PatternEvent& event) {
     if (!seq || slot < 0 || slot >= PatternSequencer::SLOT_COUNT) return false;
-    if (event.sample_pad < 0 || event.sample_pad >= PatternSequencer::SLOT_COUNT) return false;
+    if (event.type == PATTERN_EVENT_PAD &&
+        (event.sample_pad < 0 || event.sample_pad >= PatternSequencer::SLOT_COUNT)) return false;
     int length_ticks = pattern_length_ticks(seq, slot);
     PatternEvent clamped = event;
     clamped.tick = std::clamp(clamped.tick, 0, std::max(0, length_ticks - 1));
@@ -332,7 +334,19 @@ void pattern_record_pad_hit(PatternSequencer* seq, int sample_pad, int velocity)
     tick %= length_ticks;
     if (tick < 0) tick += length_ticks;
 
-    slot.events.push_back({tick, sample_pad, std::clamp(velocity, 1, 127)});
+    slot.events.push_back({PATTERN_EVENT_PAD, tick, sample_pad, std::clamp(velocity, 1, 127)});
+    slot.assigned = true;
+    sort_events(seq, seq->record_slot);
+}
+
+void pattern_record_hold_toggle(PatternSequencer* seq) {
+    if (!seq || !seq->recording || seq->count_in || seq->record_slot < 0 || seq->record_slot >= PatternSequencer::SLOT_COUNT) return;
+    auto& slot = seq->slots[seq->record_slot];
+    const int length_ticks = pattern_length_ticks(seq, seq->record_slot);
+    int tick = (int)std::lround(seq->tick_position);
+    tick %= length_ticks;
+    if (tick < 0) tick += length_ticks;
+    slot.events.push_back({PATTERN_EVENT_HOLD, tick, 0, 127});
     slot.assigned = true;
     sort_events(seq, seq->record_slot);
 }

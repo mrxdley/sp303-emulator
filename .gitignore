@@ -1,2 +1,6 @@
 build/
 *.json
+*.pdf
+*.PDF
+*.ai
+*.psd

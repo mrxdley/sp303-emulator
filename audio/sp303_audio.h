@@ -82,6 +82,9 @@ void audio_trigger_mode(Audio* a, int slot, bool loop, bool gate, bool reverse);
 void audio_trigger_velocity(Audio* a, int slot, float velocity);
 void audio_trigger_mode_velocity(Audio* a, int slot, bool loop, bool gate, bool reverse, float velocity);
 void audio_note_off    (Audio* a, int slot); // for gate mode release
+void audio_set_hold_enabled(Audio* a, bool enabled);
+bool audio_get_hold_enabled(Audio* a);
+bool audio_has_active_gate_voices(Audio* a);
 bool audio_is_playing  (Audio* a, int slot);
 void audio_stop        (Audio* a, int slot); // silence all voices on slot
 

@@ -60,7 +60,7 @@ void sync_memory_card_live_pattern(Device* dev, int slot) {
         for (int i = 0; i < count; ++i) {
             PatternEvent ev{};
             if (pattern_get_event(&dev->pattern_seq, slot, i, &ev)) {
-                dst.events.push_back({ev.tick, ev.sample_pad, ev.velocity});
+                dst.events.push_back({ev.type, ev.tick, ev.sample_pad, ev.velocity});
             }
         }
     }
@@ -97,6 +97,7 @@ bool get_pattern_project_events(const Device* dev, int slot, PatternProjectEvent
     for (int i = 0; i < n; ++i) {
         PatternEvent ev{};
         if (!pattern_get_event(&dev->pattern_seq, slot, i, &ev)) return false;
+        out_events[i].type = ev.type;
         out_events[i].tick = ev.tick;
         out_events[i].sample_pad = ev.sample_pad;
         out_events[i].velocity = ev.velocity;
@@ -109,6 +110,7 @@ bool set_pattern_project_events(Device* dev, int slot, const PatternProjectEvent
     pattern_clear_events(&dev->pattern_seq, slot);
     for (int i = 0; i < count; ++i) {
         PatternEvent ev{};
+        ev.type = events[i].type;
         ev.tick = events[i].tick;
         ev.sample_pad = events[i].sample_pad;
         ev.velocity = events[i].velocity;
@@ -261,7 +263,7 @@ bool set_memory_card_backup_pattern_events(Device* dev, int backup_slot, int ind
     dst.clear();
     dst.reserve((size_t)count);
     for (int i = 0; i < count; ++i) {
-        dst.push_back({events[i].tick, events[i].sample_pad, events[i].velocity});
+        dst.push_back({events[i].type, events[i].tick, events[i].sample_pad, events[i].velocity});
     }
     dev->memory_card_dirty = true;
     return true;

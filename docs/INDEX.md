@@ -40,6 +40,8 @@ Use this file as the human entry point for the repo.
 ## Active Work / Gaps
 
 - [TODO.md](../TODO.md)
+- [AUDIO_LOOPBACK_HOWTO.md](AUDIO_LOOPBACK_HOWTO.md)
+- [KNOWN_INACCURACIES.md](KNOWN_INACCURACIES.md)
   - current open tasks
   - convenience features
   - known implementation caveats

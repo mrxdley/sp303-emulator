@@ -4,6 +4,7 @@
 
 namespace sp303 {
 
+int  audio_estimate_sample_bpm(Audio* a, const Sample& s);
 void audio_load_sample_impl(Audio* a, int slot, const float* pcm, uint32_t frames);
 void audio_clear_sample_impl(Audio* a, int slot);
 void audio_swap_samples_impl(Audio* a, int slot_a, int slot_b);

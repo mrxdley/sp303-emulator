@@ -93,14 +93,6 @@ static void render_time_stretch(const Sample& s,
     *out_frames = out_len;
 }
 
-static int normalize_bpm_local(int bpm) {
-    if (bpm <= 0) return 120;
-    if (bpm < 61) bpm *= 2;
-    while (bpm < 40) bpm *= 2;
-    while (bpm > 200) bpm = (int)std::lround(bpm * 0.5f);
-    return std::clamp(bpm, 40, 200);
-}
-
 float audio_velocity_gain_from_midi(int velocity) {
     const float norm = std::clamp(velocity, 1, 127) / 127.0f;
     // Attenuation-only curve: full velocity preserves current sample level,
@@ -109,17 +101,14 @@ float audio_velocity_gain_from_midi(int velocity) {
 }
 
 static int derive_sample_bpm_unlocked(const Audio* a, const Sample& s) {
-    const uint32_t size = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
-    if (size <= 1) return 120;
-    const uint32_t start = std::min(s.start_frame, size - 1);
-    const uint32_t end = std::clamp((s.end_frame == 0 ? size : s.end_frame), start + 1, size);
-    const uint32_t span = std::max(1u, end - start);
-    const float seconds = span / (float)a->cfg.sample_rate;
-    if (seconds <= 0.0f) return 120;
-    int bpm = (int)std::lround(60.0f / seconds);
+    int bpm = audio_estimate_sample_bpm(const_cast<Audio*>(a), s);
     if (s.bpm_adjust < 0) bpm = (int)std::lround(bpm * 0.5f);
     else if (s.bpm_adjust > 0) bpm *= 2;
-    return normalize_bpm_local(bpm);
+    if (bpm <= 0) return 120;
+    if (bpm < 61) bpm *= 2;
+    while (bpm < 40) bpm *= 2;
+    while (bpm > 200) bpm = (int)std::lround(bpm * 0.5f);
+    return std::clamp(bpm, 40, 200);
 }
 
 static uint32_t sample_span_frames_unlocked(const Sample& s) {
@@ -743,7 +732,49 @@ bool audio_is_playing(Audio* a, int slot) {
 }
 
 void audio_note_off(Audio* a, int slot) {
-    audio_stop(a, slot);
+    if (!a) return;
+    std::lock_guard<std::mutex> lock(a->voice_mutex);
+    bool hold_enabled = a->hold_enabled.load(std::memory_order_relaxed);
+    for (auto& v : a->voices) {
+        if (!v.active || v.slot != slot) continue;
+        if (v.gate_mode && (hold_enabled || v.held_latched)) continue;
+        v.active = false;
+    }
+}
+
+void audio_set_hold_enabled(Audio* a, bool enabled) {
+    if (!a) return;
+    a->hold_enabled.store(enabled, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(a->voice_mutex);
+    if (enabled) {
+        for (auto& v : a->voices) {
+            if (v.active && v.gate_mode) {
+                v.held_latched = true;
+            }
+        }
+    } else {
+        for (auto& v : a->voices) {
+            if (!v.active || !v.gate_mode) continue;
+            if (v.held_latched) {
+                v.active = false;
+                v.held_latched = false;
+            }
+        }
+    }
+}
+
+bool audio_get_hold_enabled(Audio* a) {
+    if (!a) return false;
+    return a->hold_enabled.load(std::memory_order_relaxed);
+}
+
+bool audio_has_active_gate_voices(Audio* a) {
+    if (!a) return false;
+    std::lock_guard<std::mutex> lock(a->voice_mutex);
+    for (const auto& v : a->voices) {
+        if (v.active && v.gate_mode && !v.held_latched) return true;
+    }
+    return false;
 }
 
 void audio_trigger_mode_velocity(Audio* a, int slot, bool loop, bool gate, bool reverse, float velocity) {
@@ -811,6 +842,8 @@ void audio_trigger_mode_velocity(Audio* a, int slot, bool loop, bool gate, bool 
             v.loop_start = play_loop_start;
             v.end_position = play_end;
             v.looping = loop;
+            v.gate_mode = gate;
+            v.held_latched = gate && a->hold_enabled.load(std::memory_order_relaxed);
             v.reverse = reverse;
             v.gain = 1.0f;
             v.velocity = velocity;
@@ -863,6 +896,8 @@ void audio_trigger_mode_velocity(Audio* a, int slot, bool loop, bool gate, bool 
     target->gain         = 1.0f;
     target->velocity     = velocity;
     target->looping      = loop;
+    target->gate_mode    = gate;
+    target->held_latched = gate && a->hold_enabled.load(std::memory_order_relaxed);
     target->reverse      = reverse;
     target->active       = true;
 

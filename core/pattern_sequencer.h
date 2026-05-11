@@ -5,7 +5,13 @@
 
 namespace sp303 {
 
+enum PatternEventType {
+    PATTERN_EVENT_PAD = 0,
+    PATTERN_EVENT_HOLD = 1,
+};
+
 struct PatternEvent {
+    int type = PATTERN_EVENT_PAD;
     int tick = 0;
     int sample_pad = 0;
     int velocity = 127;
@@ -90,6 +96,7 @@ void pattern_stop(PatternSequencer* seq);
 void pattern_start_record(PatternSequencer* seq, int slot);
 void pattern_stop_record(PatternSequencer* seq);
 void pattern_record_pad_hit(PatternSequencer* seq, int sample_pad, int velocity);
+void pattern_record_hold_toggle(PatternSequencer* seq);
 void pattern_advance(PatternSequencer* seq, uint32_t samples_elapsed, uint32_t sample_rate);
 bool pattern_consume_trigger(PatternSequencer* seq, PatternEvent* out);
 int  pattern_consume_metronome(PatternSequencer* seq);

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace sp303 {
 
@@ -19,7 +20,7 @@ static int normalize_bpm(int bpm) {
     return std::clamp(bpm, 40, 200);
 }
 
-static int derive_base_bpm(const Audio* a, const Sample& s) {
+static int estimate_bpm_from_length(const Audio* a, const Sample& s) {
     const uint32_t size = (uint32_t)(s.pcm.size() / std::max(1u, s.channels));
     if (size <= 1) return 120;
     const uint32_t start = std::min(s.start_frame, size - 1);
@@ -28,6 +29,68 @@ static int derive_base_bpm(const Audio* a, const Sample& s) {
     const float seconds = span / (float)a->cfg.sample_rate;
     if (seconds <= 0.0f) return 120;
     return normalize_bpm((int)std::lround(60.0f / seconds));
+}
+
+int audio_estimate_sample_bpm(Audio* a, const Sample& s) {
+    if (!a) return 120;
+    const uint32_t channels = std::max(1u, s.channels);
+    const uint32_t size = (uint32_t)(s.pcm.size() / channels);
+    if (size <= a->cfg.sample_rate / 4) return estimate_bpm_from_length(a, s);
+
+    const uint32_t start = std::min(s.start_frame, size - 1);
+    const uint32_t end = std::clamp((s.end_frame == 0 ? size : s.end_frame), start + 1, size);
+    const uint32_t span = std::max(1u, end - start);
+    if (span <= a->cfg.sample_rate / 4) return estimate_bpm_from_length(a, s);
+
+    const int hop = 256;
+    const int env_count = std::max(1, (int)(span / hop));
+    if (env_count < 8) return estimate_bpm_from_length(a, s);
+
+    std::vector<float> env((size_t)env_count, 0.0f);
+    for (int i = 0; i < env_count; ++i) {
+        uint32_t frame0 = start + (uint32_t)i * hop;
+        uint32_t frame1 = std::min(end, frame0 + (uint32_t)hop);
+        float sum = 0.0f;
+        for (uint32_t f = frame0; f < frame1; ++f) {
+            if (channels == 1) {
+                sum += std::fabs(s.pcm[f]);
+            } else {
+                float mono = 0.0f;
+                for (uint32_t ch = 0; ch < channels; ++ch) mono += s.pcm[f * channels + ch];
+                sum += std::fabs(mono / (float)channels);
+            }
+        }
+        env[(size_t)i] = sum / std::max(1u, frame1 - frame0);
+    }
+
+    std::vector<float> onset((size_t)env_count, 0.0f);
+    for (int i = 1; i < env_count; ++i) {
+        onset[(size_t)i] = std::max(0.0f, env[(size_t)i] - env[(size_t)i - 1]);
+    }
+    float mean = 0.0f;
+    for (float v : onset) mean += v;
+    mean /= (float)env_count;
+    for (float& v : onset) v = std::max(0.0f, v - mean * 0.5f);
+
+    const float env_rate = a->cfg.sample_rate / (float)hop;
+    const int min_lag = std::max(1, (int)std::floor((60.0f * env_rate) / 200.0f));
+    const int max_lag = std::max(min_lag + 1, std::min(env_count - 1, (int)std::ceil((60.0f * env_rate) / 40.0f)));
+
+    float best_score = 0.0f;
+    int best_lag = -1;
+    for (int lag = min_lag; lag <= max_lag; ++lag) {
+        float score = 0.0f;
+        for (int i = lag; i < env_count; ++i) score += onset[(size_t)i] * onset[(size_t)(i - lag)];
+        if (score > best_score) {
+            best_score = score;
+            best_lag = lag;
+        }
+    }
+
+    if (best_lag <= 0 || best_score <= 0.00001f) return estimate_bpm_from_length(a, s);
+
+    int bpm = (int)std::lround((60.0f * env_rate) / (float)best_lag);
+    return normalize_bpm(bpm);
 }
 
 static int apply_bpm_adjust(int bpm, int adjust) {
@@ -198,7 +261,7 @@ int audio_get_sample_bpm_impl(Audio* a, int slot) {
     std::lock_guard<std::mutex> lock(a->voice_mutex);
     const auto& s = a->samples[slot];
     if (s.pcm.empty()) return 120;
-    return apply_bpm_adjust(derive_base_bpm(a, s), s.bpm_adjust);
+    return apply_bpm_adjust(audio_estimate_sample_bpm(a, s), s.bpm_adjust);
 }
 
 void audio_set_sample_bpm_adjust_impl(Audio* a, int slot, int adjust) {

@@ -2238,6 +2238,11 @@ bool is_pattern_mode(const Device* dev) {
     return pattern_mode_active(dev);
 }
 
+bool is_pattern_playing(const Device* dev) {
+    if (!dev) return false;
+    return pattern_is_playing(&dev->pattern_seq);
+}
+
 bool is_pattern_recording(const Device* dev) {
     if (!dev) return false;
     return dev->pattern_recording;
@@ -2389,6 +2394,7 @@ bool consume_pattern_trigger(Device* dev, PatternProjectEvent* out) {
     if (!dev || !out) return false;
     PatternEvent ev{};
     if (!pattern_consume_trigger(&dev->pattern_seq, &ev)) return false;
+    out->type = ev.type;
     out->tick = ev.tick;
     out->sample_pad = ev.sample_pad;
     out->velocity = ev.velocity;
@@ -2475,6 +2481,13 @@ void note_pad_played(Device* dev, int pad_index, int velocity) {
     dev->last_played_pad = pad_index;
     if (dev->pattern_recording) {
         pattern_record_pad_hit(&dev->pattern_seq, pad_index, std::clamp(velocity, 1, 127));
+    }
+}
+
+void note_hold_toggled(Device* dev) {
+    if (!dev) return;
+    if (dev->pattern_recording) {
+        pattern_record_hold_toggle(&dev->pattern_seq);
     }
 }
 

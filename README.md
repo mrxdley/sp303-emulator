@@ -1,47 +1,60 @@
-# SP-303 Emulator
+# SP-303
 
-Roland SP-303-inspired sampler emulator in C++.
+Workflow-first SP-303 emulator in C++.
 
-This project is not a generic beat pad app. It is an in-progress attempt to reproduce SP-303 workflows, states, button chords, display behavior, and sample-edit logic closely enough to be tested against the original manual.
+This is not a generic sampler app with SP-303 styling on top. The project is built around reproducing the machine's actual interaction model: button chords, modal states, display behavior, awkward transitions, pattern flow, resampling habits, and memory-card workflows.
 
-## Current State
+The goal is simple: if you know the box, this should feel recognisable.
 
-Implemented in some form:
+## Screens
+
+Room for screenshots and demo images:
+
+```text
+[ desktop renderer screenshot ]
+[ pattern / resample workflow screenshot ]
+[ memory card / save-load screenshot ]
+```
+
+## What It Does
+
+Implemented now:
 - sampling
-- threshold sampling mode
+- threshold sampling
 - resampling
-- sample fine edit: `START / END / LEVEL`
-- `MARK`-based start/end workflows
+- `START / END / LEVEL` sample editing
+- `MARK`-based trim workflows
 - sample BPM correction and time modify
-- loop / one-shot / gate / trigger / reverse playback
-- pad/sample swap, delete, truncate, delete-all
-- per-pad effects routing
+- loop / one-shot / gate / reverse playback
+- hold-latched gate playback
+- pad swap, delete, truncate, delete-all
+- per-pad effect routing
 - direct effects:
   - `FILTER+DRIVE`
   - `PITCH`
   - `DELAY`
   - `VINYL SIM`
   - `ISOLATOR`
-- MFX currently implemented:
+- MFX implemented so far:
   - `1 REVERB`
   - `2 TAPE ECHO`
   - `3 CHORUS`
   - `4 FLANGER`
   - `5 PHASER`
   - `6 TREMOLO/PAN`
-- pattern sequencer core workflows
-- project quick save/load
+- pattern recording / playback
+- pattern velocity persistence
+- pattern hold events
+- project quicksave / quickload
 - virtual memory card model
-- sample/pattern backup save/load through the card system
-- pattern-event velocity persistence in the engine
+- sample / pattern backup save-load through card workflows
 
-Still rough / incomplete:
-- many edge cases still need manual cross-checking
+Still open:
 - remaining MFX `7..21`
-- renderer skinning / final visual design
 - MIDI input
-- import workflow for external WAV/AIFF files
-- some manual-faithful behaviors are still under investigation
+- more manual-faithfulness cleanup
+- renderer / presentation polish
+- some DSP tuning and edge-case verification
 
 ## Build
 
@@ -50,43 +63,36 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-Run:
+Run the renderer:
 
 ```bash
 ./build/sp303_renderer
 ```
 
-Smoke test:
+Run the smoke test:
 
 ```bash
 ./build/sp303_test
 ```
 
-## Dependencies
-
-Fetched automatically by CMake:
-- `raylib`
-- `nlohmann/json`
-- `miniaudio`
-
-## Repo Layout
+## Project Layout
 
 ```text
 core/
-  SP-303 device state machine, workflows, display/LED state, pattern logic,
-  memory-card state, renderer-facing state snapshot
+  device state machine, button logic, display state, pattern logic,
+  memory-card state, renderer-facing queries
 
 audio/
-  sample storage, playback, recording/resampling, effect DSP, voice handling
+  sample storage, playback, recording/resampling, effects, voice handling
 
 renderer/
-  raylib frontend, controller bridge, project I/O, card image I/O
+  raylib frontend, input bridge, project I/O, card I/O, layout logic
 
 tests/
-  smoke test
+  smoke coverage
 ```
 
-Key files:
+Important files:
 - [core/sp303.cpp](core/sp303.cpp)
 - [core/sp303_card.cpp](core/sp303_card.cpp)
 - [core/sp303_state.cpp](core/sp303_state.cpp)
@@ -98,14 +104,14 @@ Key files:
 
 ## Virtual Memory Card
 
-This emulator uses a virtual SmartMedia-style card image backed by a folder on disk.
+The emulator uses a SmartMedia-style virtual card backed by a folder on disk.
 
 Current model:
-- banks `A/B` = internal memory
-- banks `C/D` = live card memory
-- card backup slots `1..8` store internal sample/pattern sets
+- banks `A/B` are internal
+- banks `C/D` are live card memory
+- backup slots `1..8` store internal sample / pattern sets
 
-The active card folder is selected from the renderer audio/config tab. Card state is serialized to a folder containing:
+The active card folder is selected from the UI. Card contents are serialized as:
 - `card.json`
 - sample WAV files
 
@@ -114,26 +120,30 @@ The active card folder is selected from the renderer audio/config tab. Card stat
 Start here:
 - [docs/INDEX.md](docs/INDEX.md)
 
-Deep docs already in repo:
+Useful references in the repo:
 - [ONBOARDING.md](ONBOARDING.md)
 - [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md)
 - [MANUAL_TEST_SUITE.md](MANUAL_TEST_SUITE.md)
 - [TODO.md](TODO.md)
+- [docs/AUDIO_LOOPBACK_HOWTO.md](docs/AUDIO_LOOPBACK_HOWTO.md)
+- [docs/KNOWN_INACCURACIES.md](docs/KNOWN_INACCURACIES.md)
 - [PATTERN_SEQUENCER_IMPLEMENTATION_PLAN.md](PATTERN_SEQUENCER_IMPLEMENTATION_PLAN.md)
 - [HOW-TO-SAVE-LOAD-IMPLEMENT.md](HOW-TO-SAVE-LOAD-IMPLEMENT.md)
 
-## Design Intent
+## Design Notes
 
-A lot of behavior here is intentionally awkward because the hardware is awkward.
+The project does not try to smooth out every rough edge in the original workflow.
 
-When in doubt:
-- prefer the SP-303 manual over “clean app” instincts
-- prefer explicit state transitions over clever hidden behavior
-- test workflows as button sequences, not isolated helper functions
+When there is a choice between:
+- a cleaner modern UX
+- and a more recognisable SP-303 interaction
 
-## Publishing Notes
+the second option usually wins.
 
-Before public screenshots or demos:
-- assume the renderer is still an engineering UI, not a finished skin
-- verify manual workflows against [MANUAL_TEST_SUITE.md](MANUAL_TEST_SUITE.md)
-- decide what should be described as authentic behavior vs emulator convenience
+That also means some awkward behavior is deliberate.
+
+## Status
+
+This is already usable as an instrument.
+
+It is not finished, and it is not claiming perfect hardware fidelity yet. But the core workflow is there, and the remaining work is mostly accuracy, coverage, and polish rather than basic capability.

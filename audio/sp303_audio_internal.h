@@ -30,6 +30,8 @@ struct Voice {
     float    gain         = 1.0f;
     float    velocity     = 1.0f;
     bool     looping      = false;
+    bool     gate_mode    = false;
+    bool     held_latched = false;
     bool     reverse      = false;
     bool     active       = false;
 
@@ -87,6 +89,7 @@ struct Audio {
     std::atomic<float>    fx_p2{0.0f};          // RESONANCE knob value
     std::atomic<float>    fx_p3{0.5f};          // DRIVE    knob value
     std::atomic<int>      pattern_bpm{120};
+    std::atomic<bool>     hold_enabled{false};
     std::atomic<int>      metronome_level{0};      // 0-127
     std::atomic<int>      metronome_accent{0};     // 0 none, 1 weak, 2 strong
     std::atomic<int>      metronome_frames_left{0};

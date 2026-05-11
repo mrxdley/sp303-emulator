@@ -30,7 +30,10 @@ struct RendererController {
     bool was_time_bpm_mode = false;
     bool was_input_gain_mode = false;
     bool was_effect_param_mode = false;
+    bool rec_gain_touched = false;
     bool was_pattern_record_select = false;
+    bool was_pattern_playing = false;
+    bool was_pattern_recording = false;
     int pattern_preview_beat_index = 0;
     int time_bpm_display_kind = 0; // 0=number, 1=off, 2=pattern
     int time_bpm_display_value = 120;

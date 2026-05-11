@@ -275,6 +275,7 @@ ProjectIoResult project_save(const std::filesystem::path& project_dir,
             }
             for (int i = 0; i < event_count; ++i) {
                 jslot["events"].push_back({
+                    {"type", events[(size_t)i].type},
                     {"tick", events[(size_t)i].tick},
                     {"sample_pad", events[(size_t)i].sample_pad},
                     {"velocity", events[(size_t)i].velocity},
@@ -355,6 +356,7 @@ ProjectIoResult project_save(const std::filesystem::path& project_dir,
                 sp303::get_memory_card_backup_pattern_events(dev, backup_slot, i, events.data(), event_count, &event_count);
                 for (int e = 0; e < event_count; ++e) {
                     jpslot["events"].push_back({
+                        {"type", events[(size_t)e].type},
                         {"tick", events[(size_t)e].tick},
                         {"sample_pad", events[(size_t)e].sample_pad},
                         {"velocity", events[(size_t)e].velocity}
@@ -590,6 +592,7 @@ ProjectIoResult project_load(const std::filesystem::path& project_dir,
         if (jslot.contains("events") && jslot["events"].is_array()) {
             for (const auto& jev : jslot["events"]) {
                 sp303::PatternProjectEvent ev{};
+                ev.type = jev.value("type", 0);
                 ev.tick = jev.value("tick", 0);
                 ev.sample_pad = jev.value("sample_pad", 0);
                 ev.velocity = std::clamp(jev.value("velocity", 127), 1, 127);

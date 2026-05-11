@@ -25,6 +25,7 @@ struct MemoryCardSampleData {
 };
 
 struct MemoryCardPatternEvent {
+    int type = 0;
     int tick = 0;
     int sample_pad = 0;
     int velocity = 127;

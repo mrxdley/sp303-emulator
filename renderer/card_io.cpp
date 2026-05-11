@@ -221,7 +221,7 @@ CardIoResult card_save(const std::filesystem::path& card_dir,
             std::vector<sp303::PatternProjectEvent> events((size_t)event_count);
             sp303::get_pattern_project_events(dev, slot, events.data(), event_count, &event_count);
             for (const auto& ev : events) {
-                jslot["events"].push_back({{"tick", ev.tick}, {"sample_pad", ev.sample_pad}, {"velocity", ev.velocity}});
+                jslot["events"].push_back({{"type", ev.type}, {"tick", ev.tick}, {"sample_pad", ev.sample_pad}, {"velocity", ev.velocity}});
             }
         }
         root["live_patterns_cd"].push_back(jslot);
@@ -289,7 +289,7 @@ CardIoResult card_save(const std::filesystem::path& card_dir,
                 std::vector<sp303::PatternProjectEvent> events((size_t)event_count);
                 sp303::get_memory_card_backup_pattern_events(dev, backup_slot, i, events.data(), event_count, &event_count);
                 for (const auto& ev : events) {
-                    jp["events"].push_back({{"tick", ev.tick}, {"sample_pad", ev.sample_pad}, {"velocity", ev.velocity}});
+                    jp["events"].push_back({{"type", ev.type}, {"tick", ev.tick}, {"sample_pad", ev.sample_pad}, {"velocity", ev.velocity}});
                 }
             }
             jbackup["pattern_slots"].push_back(jp);
@@ -401,7 +401,12 @@ CardIoResult card_load(const std::filesystem::path& card_dir,
             std::vector<sp303::PatternProjectEvent> events;
             if (jp.contains("events") && jp["events"].is_array()) {
                 for (const auto& je : jp["events"]) {
-                    events.push_back({je.value("tick", 0), je.value("sample_pad", 0), std::clamp(je.value("velocity", 127), 1, 127)});
+                    sp303::PatternProjectEvent ev{};
+                    ev.type = je.value("type", 0);
+                    ev.tick = je.value("tick", 0);
+                    ev.sample_pad = je.value("sample_pad", 0);
+                    ev.velocity = std::clamp(je.value("velocity", 127), 1, 127);
+                    events.push_back(ev);
                 }
             }
             sp303::set_pattern_project_events(dev, slot, events.data(), (int)events.size());
@@ -459,7 +464,12 @@ CardIoResult card_load(const std::filesystem::path& card_dir,
                     std::vector<sp303::PatternProjectEvent> events;
                     if (jp.contains("events") && jp["events"].is_array()) {
                         for (const auto& je : jp["events"]) {
-                            events.push_back({je.value("tick", 0), je.value("sample_pad", 0), std::clamp(je.value("velocity", 127), 1, 127)});
+                            sp303::PatternProjectEvent ev{};
+                            ev.type = je.value("type", 0);
+                            ev.tick = je.value("tick", 0);
+                            ev.sample_pad = je.value("sample_pad", 0);
+                            ev.velocity = std::clamp(je.value("velocity", 127), 1, 127);
+                            events.push_back(ev);
                         }
                     }
                     sp303::set_memory_card_backup_pattern_events(dev, backup_slot, index, events.data(), (int)events.size());
