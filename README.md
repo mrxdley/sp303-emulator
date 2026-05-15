@@ -1,4 +1,4 @@
-# SP-303
+# SP-303 Emulator (NOT AFFILIATED WITH ROLAND IN ANY WAY)
 
 Workflow-central SP-303 emulator in C++.
 
