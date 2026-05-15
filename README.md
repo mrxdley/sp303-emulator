@@ -1,20 +1,12 @@
 # SP-303
 
-Workflow-first SP-303 emulator in C++.
+Workflow-central SP-303 emulator in C++.
 
 This is not a generic sampler app with SP-303 styling on top. The project is built around reproducing the machine's actual interaction model: button chords, modal states, display behavior, awkward transitions, pattern flow, resampling habits, and memory-card workflows.
 
-The goal is simple: if you know the box, this should feel recognisable.
+If you know the hardware, you know this software.
 
-## Screens
-
-Room for screenshots and demo images:
-
-```text
-[ desktop renderer screenshot ]
-[ pattern / resample workflow screenshot ]
-[ memory card / save-load screenshot ]
-```
+<img width="501" height="703" alt="image" src="https://github.com/user-attachments/assets/3c1063e9-6a30-4357-8255-37870afe7447" />
 
 ## What It Does
 
@@ -55,6 +47,8 @@ Still open:
 - more manual-faithfulness cleanup
 - renderer / presentation polish
 - some DSP tuning and edge-case verification
+
+  <img width="446" height="421" alt="image" src="https://github.com/user-attachments/assets/f34dba52-3f6e-45d6-96ce-0aca3aac71cb" />
 
 ## Build
 
@@ -144,6 +138,6 @@ That also means some awkward behavior is deliberate.
 
 ## Status
 
-This is already usable as an instrument.
+This is already usable as an instrument, with more updates on the way.
 
 It is not finished, and it is not claiming perfect hardware fidelity yet. But the core workflow is there, and the remaining work is mostly accuracy, coverage, and polish rather than basic capability.
